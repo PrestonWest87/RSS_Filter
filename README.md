@@ -10,10 +10,30 @@ A lightweight, human-in-the-loop intelligence pipeline. This tool ingests hundre
 * **AI/ML:** Scikit-Learn (TF-IDF Vectorizer + Naive Bayes Classifier)
 * **Deployment:** Docker Compose
 
-## ⚙️ Prerequisites
+## ⚙️ System Requirements
 
-* Docker and Docker Compose installed.
-* Minimum hardware: 1 CPU Core, 1GB RAM, 5GB Disk Space.
+This application is highly optimized and designed to run efficiently on minimal hardware. The requirements below are based on real-world telemetry with 100+ active RSS feeds and the Machine Learning engine active.
+
+### **Minimum Hardware**
+* **CPU:** 1 Core
+* **RAM:** 1 GB (Application consumes ~550 MB under active load)
+* **Storage:** 5 GB (Accommodates Docker images and PostgreSQL text storage)
+
+### **Recommended Hardware (For smooth ML training & concurrent fetching)**
+* **CPU:** 2+ Cores (UI operations like model retraining can briefly utilize >100% of a single thread)
+* **RAM:** 2 GB 
+* **Storage:** 10 GB SSD (Improves database read/write speeds for large archives)
+
+### **Software Requirements**
+* **Docker:** Engine v20.10.0 or higher
+* **Docker Compose:** v2.0.0 or higher
+* **OS:** Any Linux distribution (Ubuntu/Debian recommended), Windows (via WSL2), or macOS.
+
+### **Resource Allocation Breakdown**
+Typical baseline memory consumption per container:
+* `web` (Streamlit + ML Brain): ~250 MB - 300 MB
+* `worker` (Multithreaded Fetcher): ~200 MB - 250 MB
+* `db` (PostgreSQL 15): ~40 MB - 60 MB
 
 ## 🚀 Installation & Deployment
 
