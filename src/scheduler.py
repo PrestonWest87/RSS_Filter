@@ -42,11 +42,11 @@ def process_single_feed(source_id, source_name, source_url, scorer):
             if not link:
                 continue
                 
-            # DB Deduplication
+            # DB Deduplication (Fast check)
             if session.query(Article).filter_by(link=link).first():
                 continue
 
-            # Batch Deduplication
+            # Batch Deduplication (Per-feed check)
             if link in seen_links_in_batch:
                 continue
             seen_links_in_batch.add(link)
@@ -69,10 +69,15 @@ def process_single_feed(source_id, source_name, source_url, scorer):
                 is_bubbled=(score >= ALERT_THRESHOLD)
             )
             
-            session.add(article)
-            total_added += 1
+            # --- THE FIX: Safe Individual Commits ---
+            try:
+                session.add(article)
+                session.commit()
+                total_added += 1
+            except IntegrityError:
+                # Another thread beat us to it. Rollback this single article and move on.
+                session.rollback()
         
-        session.commit()
         if total_added > 0:
             log(f"✅ {source_name}: Found {total_added} new articles.", "WORKER")
             
