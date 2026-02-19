@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import math
 from src.database import SessionLocal, Article, FeedSource, Keyword, engine
-from src.train_model import train # Import the trainer function directly
+from src.train_model import train 
 from src.scheduler import fetch_feeds
 import time
 from sqlalchemy import text
@@ -12,19 +12,28 @@ st.set_page_config(page_title="RSS Intel Monitor", layout="wide")
 def get_db():
     return SessionLocal()
 
+session = get_db()
+
+# --- THE PERFORMANCE FIX: Callback Function ---
+# This runs in the background BEFORE the page redraws, preventing the UI from freezing.
+def change_status(art_id, new_feedback, bubble_status=None):
+    art = session.query(Article).filter(Article.id == art_id).first()
+    if art:
+        art.human_feedback = new_feedback
+        if bubble_status is not None:
+            art.is_bubbled = bubble_status
+        session.commit()
+
 # --- Sidebar Navigation ---
 st.sidebar.title("News Monitor")
 page = st.sidebar.radio("Navigation", ["Dashboard", "Training Data", "Configuration"])
 
-session = get_db()
 
-# ================= DASHBOARD =================
 # ================= DASHBOARD =================
 if page == "Dashboard":
     col_title, col_btn = st.columns([3, 1])
     col_title.title("🚨 Live News")
     
-    # The Force Run Button
     if col_btn.button("🔄 Force Fetch Feeds"):
         with st.spinner("Fetching latest intel... this may take a moment."):
             fetch_feeds(source="User Force") 
@@ -32,8 +41,6 @@ if page == "Dashboard":
             time.sleep(1)
             st.rerun()
 
-    # --- View Mode Selection ---
-    # We added "Acknowledged" to the options
     view_mode = st.radio(
         "Filter", 
         ["High Priority (Inbox)", "Acknowledged (Confirmed)", "All Articles (Archive)"], 
@@ -44,17 +51,19 @@ if page == "Dashboard":
     if view_mode == "High Priority (Inbox)":
         st.caption("Action Required: Items bubbled up by Keywords/ML waiting for review.")
         
-        # FILTER: bubbled=True AND feedback=0 (Unreviewed)
+        # PERFORMANCE FIX 2: Limit to 30 to prevent browser DOM freezing
         articles = session.query(Article).filter(
             Article.is_bubbled == True, 
             Article.human_feedback == 0
-        ).order_by(Article.score.desc()).all()
+        ).order_by(Article.score.desc()).limit(30).all()
 
         if not articles:
             st.success("🎉 You are all caught up! No pending alerts.")
+        else:
+            if len(articles) == 30:
+                st.info("Showing the top 30 pending alerts. More will load as you clear these.")
 
         for art in articles:
-            # Score Color Code
             score_color = "red" if art.score > 80 else "orange" if art.score > 50 else "blue"
             
             with st.expander(f":{score_color}[[{int(art.score)}]] {art.title}", expanded=True):
@@ -65,31 +74,19 @@ if page == "Dashboard":
                 
                 st.write(art.summary)
                 
-                # ACTION BUTTONS
                 c1, c2, c3 = st.columns([1, 1, 4])
                 
-                # Confirm -> Moves to "Acknowledged" tab
-                if c1.button("✅ Acknowledge", key=f"ack_{art.id}"):
-                    art.human_feedback = 2  # 2 = Confirmed/Important
-                    session.commit()
-                    st.rerun()
-                
-                # Dismiss -> Vanishes (only visible in Training Data)
-                if c2.button("❌ Dismiss", key=f"dis_{art.id}"):
-                    art.human_feedback = 1  # 1 = Dismissed/Noise
-                    session.commit()
-                    st.rerun()
+                # Using on_click callbacks for instant, freeze-free UI updates
+                c1.button("✅ Acknowledge", key=f"ack_{art.id}", on_click=change_status, args=(art.id, 2))
+                c2.button("❌ Dismiss", key=f"dis_{art.id}", on_click=change_status, args=(art.id, 1))
 
     # --- VIEW 2: ACKNOWLEDGED (CONFIRMED) ---
     elif view_mode == "Acknowledged (Confirmed)":
         st.subheader("✅ Confirmed Intelligence")
         st.caption("Articles you (or the AI) have marked as valid threats.")
         
-        # FILTER: feedback=2 (Confirmed)
-        # We use pagination here too because this list will grow forever
         total_ack = session.query(Article).filter(Article.human_feedback == 2).count()
         
-        # Pagination Controls
         col_c, col_i = st.columns([1, 4])
         limit = col_c.selectbox("Show", [20, 50, 100], key="ack_limit")
         
@@ -108,21 +105,14 @@ if page == "Dashboard":
                 st.write(art.summary)
                 st.markdown(f"[Read Article]({art.link})")
                 
-                # Undo Button (In case of mis-click)
-                if st.button("Re-open (Move to Inbox)", key=f"undo_{art.id}"):
-                    art.human_feedback = 0
-                    session.commit()
-                    st.rerun()
+                # Using on_click callback
+                st.button("Re-open (Move to Inbox)", key=f"undo_{art.id}", on_click=change_status, args=(art.id, 0))
 
-    # --- VIEW 3: ALL ARTICLES (ARCHIVE) ---
     # --- VIEW 3: ALL ARTICLES (ARCHIVE) ---
     elif view_mode == "All Articles (Archive)":
         st.subheader("🗄️ Feed Archive")
         
-        # 1. Calculate Total Pages
         total_articles = session.query(Article).count()
-        
-        # 2. Controls
         col_controls, col_info = st.columns([1, 3])
         
         with col_controls:
@@ -132,19 +122,13 @@ if page == "Dashboard":
         if total_pages < 1: total_pages = 1
         
         with col_controls:
-            current_page = st.number_input(
-                "Page Number", 
-                min_value=1, 
-                max_value=total_pages, 
-                value=1
-            )
+            current_page = st.number_input("Page Number", min_value=1, max_value=total_pages, value=1)
             
         with col_info:
             st.write("") 
             st.write("") 
             st.caption(f"Showing page **{current_page}** of **{total_pages}** ({total_articles} total articles)")
 
-        # 3. Efficient Query
         offset = (current_page - 1) * items_per_page
         
         articles = session.query(Article)\
@@ -155,7 +139,6 @@ if page == "Dashboard":
         
         st.divider()
 
-        # 4. Display Loop
         for art in articles:
             score_color = "red" if art.score > 50 else "orange" if art.score > 20 else "gray"
             
@@ -167,23 +150,14 @@ if page == "Dashboard":
                 
                 st.write(art.summary)
                 
-                # --- FIX: Define columns c1/c2 before using them ---
                 c1, c2 = st.columns([1, 6])
-                
-                # Promote to Inbox
-                if c1.button("Mark Critical", key=f"archive_crit_{art.id}"):
-                    art.human_feedback = 0 # Reset feedback so it appears in Inbox
-                    art.is_bubbled = True 
-                    session.commit()
-                    st.toast(f"Promoted '{art.title}' to Inbox!")
-                    time.sleep(1)
-                    st.rerun()
+                # Using on_click callback: Set feedback to 0, and bubble to True
+                c1.button("Mark Critical", key=f"archive_crit_{art.id}", on_click=change_status, args=(art.id, 0, True))
 
 # ================= TRAINING DATA =================
 elif page == "Training Data":
     st.title("🧠 Machine Learning Lab")
     
-    # 1. Stats
     count_pos = session.query(Article).filter(Article.human_feedback == 2).count()
     count_neg = session.query(Article).filter(Article.human_feedback == 1).count()
     total = count_pos + count_neg
@@ -195,7 +169,6 @@ elif page == "Training Data":
     
     st.divider()
     
-    # 2. Retrain Button
     st.subheader("Model Management")
     if st.button("🚀 Retrain Model Now", type="primary"):
         if total < 10:
@@ -203,7 +176,7 @@ elif page == "Training Data":
         else:
             with st.spinner("Training neural pathways..."):
                 try:
-                    train() # Calls your python script
+                    train() 
                     st.success("Model retrained successfully! The next scheduled fetch will use the new brain.")
                 except Exception as e:
                     st.error(f"Training failed: {e}")
@@ -219,12 +192,10 @@ elif page == "Configuration":
     
     tab1, tab2, tab3 = st.tabs(["Keywords (Rule-Based)", "RSS Sources", "Danger Zone"])
     
-    # --- Tab 1: Keywords ---
     with tab1:
         st.subheader("Manage Keywords")
         st.info("Format: `keyword, weight` (one per line). If weight is omitted, defaults to 10.")
         
-        # Bulk Add Form
         with st.form("bulk_kw"):
             raw_text = st.text_area("Bulk Add Keywords", placeholder="zero-day, 80\ncritical patch, 50\nransomware")
             if st.form_submit_button("Add Keywords"):
@@ -256,8 +227,6 @@ elif page == "Configuration":
                 st.rerun()
         
         st.divider()
-        
-        # List Keywords
         st.write("### Active Keywords")
         keywords = session.query(Keyword).order_by(Keyword.weight.desc()).all()
         for k in keywords:
@@ -269,7 +238,6 @@ elif page == "Configuration":
                 session.commit()
                 st.rerun()
 
-    # --- Tab 2: Sources ---
     with tab2:
         st.subheader("Manage RSS Feeds")
         st.info("Format: `URL, Name` (one per line).")
@@ -308,14 +276,12 @@ elif page == "Configuration":
                     session.commit()
                     st.rerun()
 
- # --- DANGER ZONE (Inside Tab 3) ---
     with tab3:    
         st.divider()
         with st.expander("⚠️ Danger Zone", expanded=False):
             st.error("These actions are irreversible!")
             col1, col2 = st.columns(2)
             
-            # Action 1: Clear Articles
             with col1:
                 st.write("**Clear History**")
                 st.caption("Deletes articles but keeps Feeds/Keywords.")
@@ -329,7 +295,6 @@ elif page == "Configuration":
                     except Exception as e:
                         st.error(f"Error: {e}")
 
-            # Action 2: Factory Reset
             with col2:
                 st.write("**Factory Reset**")
                 st.caption("Wipes EVERYTHING.")
