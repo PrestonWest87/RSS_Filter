@@ -52,7 +52,7 @@ if page == "Dashboard":
         articles = session.query(Article).filter(
             Article.is_bubbled == True, 
             Article.human_feedback == 0
-        ).order_by(Article.score.desc()).limit(30).all()
+        ).order_by(Article.published_date.desc()).limit(30).all()
 
         if not articles:
             st.success("🎉 You are all caught up! No pending articles.")
