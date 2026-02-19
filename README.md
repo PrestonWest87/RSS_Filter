@@ -1,15 +1,23 @@
-# 🚨 RSS Filter
+# 📰 RSS_Filter
 
-A lightweight, human-in-the-loop intelligence pipeline. This tool ingests hundreds of RSS feeds concurrently, scores them based on custom keyword weights, and bubbles up critical infrastructure and security threats for review. It features a built-in Machine Learning engine that learns from your acknowledgment patterns to take over scoring automatically.
+A lightweight, human-in-the-loop news aggregator and smart filter. This tool ingests hundreds of RSS feeds concurrently, scores them based on custom keyword weights, and bubbles up the most important articles for quick identification. It features a built-in Machine Learning engine that learns from your reading habits to automatically filter the noise and highlight what matters.
 
 ## 🏗️ Architecture
-
 * **Frontend:** Streamlit (Python)
 * **Backend Worker:** Python `schedule` with multithreaded `requests`
 * **Database:** PostgreSQL 15
 * **AI/ML:** Scikit-Learn (TF-IDF Vectorizer + Naive Bayes Classifier)
 * **Deployment:** Docker Compose
 
+## 📖 Usage Guide
+
+The application is built around a rapid triage workflow.
+
+1.  **Configuration:** Use the bulk-add text areas to load your RSS feed URLs and define your initial Keywords and Weights.
+2.  **Priority Queue:** The `Dashboard` will display unreviewed articles that scored above the visibility threshold. 
+    * Click **✅ Keep** for important items.
+    * Click **❌ Dismiss** for noise/irrelevant items.
+3.  **The Archive:** Dismissed articles vanish from your queue. Kept articles are moved to the `Saved Articles` tab for reading or permanent record-keeping.
 ## ⚙️ System Requirements
 
 This application is highly optimized and designed to run efficiently on minimal hardware. The requirements below are based on real-world telemetry with 100+ active RSS feeds and the Machine Learning engine active.
@@ -47,16 +55,6 @@ docker-compose up --build -d
 
 
 4. **Access the Dashboard:** Open a web browser and navigate to `http://localhost:8501`.
-
-## 📖 Usage Guide
-
-The application is built around an **"Inbox Zero"** workflow.
-
-1. **Configuration:** Navigate to the `Configuration` tab. Use the bulk-add text areas to load your RSS feed URLs and define your initial Keywords and Weights (e.g., `grid collapse, 95`).
-2. **The Inbox (High Priority):** The `Dashboard` will display unreviewed articles that scored above the alert threshold.
-* Click **✅ Acknowledge** for valid threats.
-* Click **❌ Dismiss** for noise/false positives.
-
 
 3. **The Archive:** Dismissed articles vanish from the UI. Acknowledged articles are moved to the `Acknowledged (Confirmed)` tab for permanent record-keeping.
 
