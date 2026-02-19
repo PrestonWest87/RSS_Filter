@@ -7,7 +7,7 @@ from src.scheduler import fetch_feeds
 import time
 from sqlalchemy import text
 
-st.set_page_config(page_title="RSS Intel Monitor", layout="wide")
+st.set_page_config(page_title="RSS Filter", layout="wide")
 
 def get_db():
     return SessionLocal()
@@ -15,7 +15,6 @@ def get_db():
 session = get_db()
 
 # --- THE PERFORMANCE FIX: Callback Function ---
-# This runs in the background BEFORE the page redraws, preventing the UI from freezing.
 def change_status(art_id, new_feedback, bubble_status=None):
     art = session.query(Article).filter(Article.id == art_id).first()
     if art:
@@ -25,17 +24,16 @@ def change_status(art_id, new_feedback, bubble_status=None):
         session.commit()
 
 # --- Sidebar Navigation ---
-st.sidebar.title("News Monitor")
+st.sidebar.title("RSS Filter")
 page = st.sidebar.radio("Navigation", ["Dashboard", "Training Data", "Configuration"])
-
 
 # ================= DASHBOARD =================
 if page == "Dashboard":
     col_title, col_btn = st.columns([3, 1])
-    col_title.title("🚨 Live News")
+    col_title.title("📰 News Dashboard")
     
     if col_btn.button("🔄 Force Fetch Feeds"):
-        with st.spinner("Fetching latest intel... this may take a moment."):
+        with st.spinner("Fetching latest feeds... this may take a moment."):
             fetch_feeds(source="User Force") 
             st.success("Fetch complete!")
             time.sleep(1)
@@ -43,25 +41,24 @@ if page == "Dashboard":
 
     view_mode = st.radio(
         "Filter", 
-        ["High Priority (Inbox)", "Acknowledged (Confirmed)", "All Articles (Archive)"], 
+        ["Priority Queue", "Saved Articles", "All Articles (Archive)"], 
         horizontal=True
     )
     
-    # --- VIEW 1: HIGH PRIORITY (INBOX) ---
-    if view_mode == "High Priority (Inbox)":
-        st.caption("Action Required: Items bubbled up by Keywords/ML waiting for review.")
+    # --- VIEW 1: PRIORITY QUEUE (INBOX) ---
+    if view_mode == "Priority Queue":
+        st.caption("Review Queue: Articles flagged by your keywords and ML model.")
         
-        # PERFORMANCE FIX 2: Limit to 30 to prevent browser DOM freezing
         articles = session.query(Article).filter(
             Article.is_bubbled == True, 
             Article.human_feedback == 0
         ).order_by(Article.score.desc()).limit(30).all()
 
         if not articles:
-            st.success("🎉 You are all caught up! No pending alerts.")
+            st.success("🎉 You are all caught up! No pending articles.")
         else:
             if len(articles) == 30:
-                st.info("Showing the top 30 pending alerts. More will load as you clear these.")
+                st.info("Showing the top 30 pending articles. More will load as you clear these.")
 
         for art in articles:
             score_color = "red" if art.score > 80 else "orange" if art.score > 50 else "blue"
@@ -76,14 +73,14 @@ if page == "Dashboard":
                 
                 c1, c2, c3 = st.columns([1, 1, 4])
                 
-                # Using on_click callbacks for instant, freeze-free UI updates
-                c1.button("✅ Acknowledge", key=f"ack_{art.id}", on_click=change_status, args=(art.id, 2))
+                # Rebranded Buttons
+                c1.button("✅ Keep", key=f"ack_{art.id}", on_click=change_status, args=(art.id, 2))
                 c2.button("❌ Dismiss", key=f"dis_{art.id}", on_click=change_status, args=(art.id, 1))
 
-    # --- VIEW 2: ACKNOWLEDGED (CONFIRMED) ---
-    elif view_mode == "Acknowledged (Confirmed)":
-        st.subheader("✅ Confirmed Intelligence")
-        st.caption("Articles you (or the AI) have marked as valid threats.")
+    # --- VIEW 2: SAVED ARTICLES ---
+    elif view_mode == "Saved Articles":
+        st.subheader("✅ Saved Articles")
+        st.caption("Articles you or the AI have marked as important.")
         
         total_ack = session.query(Article).filter(Article.human_feedback == 2).count()
         
@@ -97,7 +94,7 @@ if page == "Dashboard":
             .all()
         
         if not articles:
-            st.info("No acknowledged articles yet.")
+            st.info("No saved articles yet.")
 
         for art in articles:
             with st.expander(f"✅ [[{int(art.score)}]] {art.title}"):
@@ -105,8 +102,7 @@ if page == "Dashboard":
                 st.write(art.summary)
                 st.markdown(f"[Read Article]({art.link})")
                 
-                # Using on_click callback
-                st.button("Re-open (Move to Inbox)", key=f"undo_{art.id}", on_click=change_status, args=(art.id, 0))
+                st.button("Remove from Saved", key=f"undo_{art.id}", on_click=change_status, args=(art.id, 0))
 
     # --- VIEW 3: ALL ARTICLES (ARCHIVE) ---
     elif view_mode == "All Articles (Archive)":
@@ -151,12 +147,11 @@ if page == "Dashboard":
                 st.write(art.summary)
                 
                 c1, c2 = st.columns([1, 6])
-                # Using on_click callback: Set feedback to 0, and bubble to True
-                c1.button("Mark Critical", key=f"archive_crit_{art.id}", on_click=change_status, args=(art.id, 0, True))
+                c1.button("Flag as Important", key=f"archive_crit_{art.id}", on_click=change_status, args=(art.id, 0, True))
 
 # ================= TRAINING DATA =================
 elif page == "Training Data":
-    st.title("🧠 Machine Learning Lab")
+    st.title("🧠 Smart Filter Training")
     
     count_pos = session.query(Article).filter(Article.human_feedback == 2).count()
     count_neg = session.query(Article).filter(Article.human_feedback == 1).count()
@@ -197,7 +192,7 @@ elif page == "Configuration":
         st.info("Format: `keyword, weight` (one per line). If weight is omitted, defaults to 10.")
         
         with st.form("bulk_kw"):
-            raw_text = st.text_area("Bulk Add Keywords", placeholder="zero-day, 80\ncritical patch, 50\nransomware")
+            raw_text = st.text_area("Bulk Add Keywords", placeholder="infrastructure, 80\npower grid, 50\ntelecom")
             if st.form_submit_button("Add Keywords"):
                 lines = raw_text.split('\n')
                 added_count = 0
@@ -243,7 +238,7 @@ elif page == "Configuration":
         st.info("Format: `URL, Name` (one per line).")
         
         with st.form("bulk_feed"):
-            raw_text = st.text_area("Bulk Add Feeds", placeholder="https://site.com/feed, Security Weekly")
+            raw_text = st.text_area("Bulk Add Feeds", placeholder="https://site.com/feed, Tech News")
             if st.form_submit_button("Add Sources"):
                 lines = raw_text.split('\n')
                 added_count = 0
