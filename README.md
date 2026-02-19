@@ -1,33 +1,3 @@
-That is great to hear! Getting those data pipelines flowing smoothly is always the hardest part.
-
-Since you engineered this with traditional machine learning and standard Python multithreading instead of resource-hungry Generative AI, this stack is incredibly lightweight. It won't even wake up the cooling fans on a standard enterprise homelab server.
-
-### **How to Measure Your Resource Usage**
-
-To see exactly what the application is consuming in real-time, use Docker's built-in metrics tool. Run this in your terminal:
-
-```bash
-docker stats
-
-```
-
-**Expected Baseline Requirements:**
-
-* **CPU:** 1-2 Cores. The multithreading relies on Network I/O (waiting for websites to respond), not heavy CPU crunching. The only time the CPU will spike is for a few seconds when you hit the "Retrain Model" button.
-* **RAM:** ~500MB to 1GB total.
-* `db` (Postgres): ~150MB - 300MB
-* `web` (Streamlit): ~150MB - 250MB
-* `worker` (Scheduler): ~100MB (spiking slightly during the concurrent fetch)
-
-
-* **Disk:** < 5GB. The Docker images take up about 1GB. PostgreSQL text storage is highly efficient; 100,000 articles will barely use a few hundred megabytes.
-
----
-
-Here is the complete `README.md` for your project repository.
-
----
-
 # 🚨 RSS Intel Monitor
 
 A lightweight, human-in-the-loop intelligence pipeline. This tool ingests hundreds of RSS feeds concurrently, scores them based on custom keyword weights, and bubbles up critical infrastructure and security threats for review. It features a built-in Machine Learning engine that learns from your acknowledgment patterns to take over scoring automatically.
