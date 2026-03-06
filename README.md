@@ -1,104 +1,134 @@
-# 📰 RSS_Filter
+Here is a fully updated, comprehensive `README.md` that reflects the massive evolution of your application from a simple RSS filter into a full-scale, AI-powered Network Operations Center (NOC) dashboard.
 
-A lightweight, human-in-the-loop news aggregator and smart filter. This tool ingests hundreds of RSS feeds concurrently, scores them based on custom keyword weights, and bubbles up the most important articles for quick identification. It features a built-in Machine Learning engine that learns from your reading habits to automatically filter the noise and highlight what matters.
+---
+
+# 🌐 NOC Intelligence Fusion Center
+
+*(Formerly RSS_Filter)*
+
+An enterprise-grade, AI-powered intelligence aggregator and Heads-Up Display (HUD) built for Network Operations Centers. This platform ingests real-time telemetry from hundreds of RSS feeds, CISA vulnerabilities, cloud infrastructure statuses, and regional physical hazards. It utilizes a hybrid intelligence engine—combining Scikit-Learn Machine Learning for threat scoring and local Large Language Models (LLMs) for automated synthesis—to cut through alert fatigue and deliver actionable intelligence.
 
 ## 🏗️ Architecture
+
 * **Frontend:** Streamlit (Python)
 * **Backend Worker:** Python `schedule` with multithreaded `requests`
 * **Database:** PostgreSQL 15
-* **AI/ML:** Scikit-Learn (TF-IDF Vectorizer + Naive Bayes Classifier)
+* **Scoring Engine (ML):** Scikit-Learn (TF-IDF Vectorizer + Naive Bayes Classifier)
+* **Synthesis Engine (AI):** Local LLM Integration (Optimized for small-parameter models like Dolphin-Phi)
 * **Deployment:** Docker Compose
 
-## 📖 Usage Guide
+## ✨ Key Features
 
-The application is built around a rapid triage workflow.
+### 1. The Main Dashboard (Zero-Scroll HUD)
 
-1.  **Configuration:** Use the bulk-add text areas to load your RSS feed URLs and define your initial Keywords and Weights.
-2.  **Priority Queue:** The `Dashboard` will display unreviewed articles that scored above the visibility threshold. 
-    * Click **✅ Keep** for important items.
-    * Click **❌ Dismiss** for noise/irrelevant items.
-3.  **The Archive:** Dismissed articles vanish from your queue. Kept articles are moved to the `Saved Articles` tab for reading or permanent record-keeping.
+A high-density, card-based interface designed to be left on a NOC wall monitor. It features a strict 24-hour operational focus, surfacing only the most critical, immediate threats.
+
+* **AI Shift Briefing:** An auto-updating, rolling narrative summarizing the last 24 hours of cyber threats, regional hazards, and cloud outages.
+* **Pinned Intelligence:** Manually pin critical articles to the top of the HUD so they never leave the glass.
+* **AI Security Auditor:** Cross-references your configured internal "Tech Stack" against the last 30 days of the CISA Known Exploited Vulnerabilities (KEV) catalog.
+
+### 2. Multi-Domain Ingestion
+
+The backend worker concurrently scrapes and normalizes data from multiple critical infrastructure domains:
+
+* **Cyber Intel:** Custom RSS feed aggregation with automated keyword-weight scoring.
+* **Vulnerabilities:** Direct integration with the CISA KEV catalog.
+* **Cloud Infrastructure:** Monitors live status pages for tier-1 providers (AWS, Azure, GCP, Cisco).
+* **Regional Hazards:** Tracks severe weather and physical grid threats via the National Weather Service.
+
+### 3. Automated Intel Report Builder
+
+A dedicated tool for analysts to search the database, multi-select specific articles, and instruct the local LLM to generate an exhaustive, highly technical intelligence report.
+
+* Outputs directly to properly formatted Markdown (`.md`).
+* Enforces strict "Context-Bounding" and Zero-Temperature prompting to completely eliminate AI hallucinations and ensure only factual, source-backed data is included.
+
+### 4. Advanced RSS Triage
+
+Replaces the standard "Inbox" with a continuous, tabbed intelligence stream.
+
+* Splits feeds into **Live Feed (>50 Score)** and **Below Threshold (<50 Score)**.
+* Includes 1-click **Batch BLUF (Bottom Line Up Front)** generation for high-threat items.
+* Features AI Macro Overviews that can read 50+ headlines and synthesize the broader global threat landscape.
+
 ## ⚙️ System Requirements
 
-This application is highly optimized and designed to run efficiently on minimal hardware. The requirements below are based on real-world telemetry with 100+ active RSS feeds and the Machine Learning engine active.
+This application is highly optimized. The requirements below are based on real-world telemetry with 100+ active RSS feeds, background API polling, and the Machine Learning engine active. *(Note: The local LLM server is assumed to be hosted externally/separately from this core stack).*
 
 ### **Minimum Hardware**
-* **CPU:** 1 Core
-* **RAM:** 1 GB (Application consumes ~550 MB under active load)
+
+* **CPU:** 2 Cores
+* **RAM:** 2 GB (Application consumes ~550 MB under active load)
 * **Storage:** 5 GB (Accommodates Docker images and PostgreSQL text storage)
 
-### **Recommended Hardware (For smooth ML training & concurrent fetching)**
-* **CPU:** 2+ Cores (UI operations like model retraining can briefly utilize >100% of a single thread)
-* **RAM:** 2 GB 
-* **Storage:** 10 GB SSD (Improves database read/write speeds for large archives)
+### **Recommended Hardware**
+
+* **CPU:** 4+ Cores (For smooth UI rendering during batch BLUF generation and ML retraining)
+* **RAM:** 4 GB
+* **Storage:** 15 GB SSD (Improves database read/write speeds for massive historical archives)
 
 ### **Software Requirements**
+
 * **Docker:** Engine v20.10.0 or higher
 * **Docker Compose:** v2.0.0 or higher
 * **OS:** Any Linux distribution (Ubuntu/Debian recommended), Windows (via WSL2), or macOS.
 
-### **Resource Allocation Breakdown**
-Typical baseline memory consumption per container:
-* `web` (Streamlit + ML Brain): ~250 MB - 300 MB
-* `worker` (Multithreaded Fetcher): ~200 MB - 250 MB
-* `db` (PostgreSQL 15): ~40 MB - 60 MB
-
 ## 🚀 Installation & Deployment
 
 1. **Clone the repository** and navigate to the project folder.
-2. **Set up environment variables:** Edit the `.env` file to change default database passwords if deploying to production.
+2. **Set up environment variables:** Edit the `.env` file to set your database passwords and point the application to your Local LLM API endpoint.
 3. **Build and start the containers:**
+
 ```bash
-docker-compose up --build -d
+docker compose up --build -d
 
 ```
 
-
 4. **Access the Dashboard:** Open a web browser and navigate to `http://localhost:8501`.
 
-3. **The Archive:** Dismissed articles vanish from the UI. Acknowledged articles are moved to the `Acknowledged (Confirmed)` tab for permanent record-keeping.
+## 🧠 Hybrid Intelligence: ML & LLM
 
-## 🧠 Machine Learning & Tuning
+This platform utilizes two completely different forms of Artificial Intelligence to manage the data pipeline.
 
-This system suffers from the "Cold Start Problem"—the ML model knows nothing until you teach it.
+### Part 1: The ML Scoring Engine (Noise Reduction)
 
-### Phase 1: Rule-Based (The Default)
+The system uses a Scikit-Learn Naive Bayes model to score incoming RSS articles.
 
-Out of the box, the system uses the `KeywordScorer`. It scans text for your configured keywords and adds up the weights. If `Total Score >= 45`, it bubbles the article to the Inbox.
+* **Rule-Based Start:** Initially, it scores based on your configured keywords and weights.
+* **Training the Brain:** As you click **🧠 Learn: Keep** or **🧠 Learn: Dismiss** on articles in the live feed, you train the model on your operational preferences.
+* **ML Takeover:** Once enough data is gathered, click **🚀 Retrain Model Now** in the settings. The system will generate `ml_model.pkl` and switch to contextual probability scoring.
 
-### Phase 2: Training the Brain
+### Part 2: The LLM Synthesis Engine (Context Generation)
 
-Every time you click "Acknowledge" or "Dismiss", you are labeling training data.
+The system connects to a local LLM to generate BLUFs, Shift Briefings, and Intel Reports. To ensure stability with smaller, local models (like 3B-8B parameter models), the system employs enterprise-grade prompt engineering:
 
-1. Review at least 50-100 articles manually using the UI to build a solid dataset.
-2. Navigate to the `Training Data` tab.
-3. Click **🚀 Retrain Model Now**.
-4. The system will generate a Naive Bayes model (`ml_model.pkl`) based on your specific operational preferences.
-
-### Phase 3: ML Takeover
-
-Once `ml_model.pkl` exists, the backend worker automatically detects it and switches from `KeywordScorer` to `MLScorer`. The ML model evaluates the contextual probability of an article being important, rather than relying on rigid keyword matching.
-
-* *Note: You can always fall back to rule-based scoring by deleting the `ml_model.pkl` file and restarting the worker.*
+* **Prompt Chunking:** Complex queries (like the Shift Briefing) are broken down into isolated API calls per domain (Cyber, Weather, Cloud) to prevent "Recency Bias" and prompt confusion.
+* **Zero-Temperature Execution:** Analytical tasks run at `0.0` or `0.1` temperature with strict XML bounding to mathematically prevent hallucinations and creative roleplay.
+* **Short-Circuit Logic:** If the database contains no high-threat alerts for a given period, the Python backend bypasses the LLM entirely, saving compute cycles and preventing the AI from inventing data to fill a quota.
 
 ## 🛠️ Troubleshooting & Commands
 
-**View Live Worker Logs (To monitor RSS scraping):**
+**View Live Worker Logs (To monitor scraping and background tasks):**
 
 ```bash
-docker-compose logs -f worker
+docker compose logs -f worker
 
 ```
 
 **Restart the Worker (Required after manual code changes):**
 
 ```bash
-docker-compose restart worker
+docker compose restart worker
 
 ```
 
-**System Reset:**
-If the database becomes bloated or you want to start fresh, navigate to `Configuration` -> `Danger Zone` in the UI to perform a safe SQL truncation of the articles table, or a complete factory reset.
+**Database Migrations & Manual Overrides:**
+To manually inject columns or run SQL commands against the database container:
+
+```bash
+docker exec -it <container_name_db_1> psql -U admin -d rss_db -c "YOUR SQL COMMAND;"
+
+```
 
 ---
 
@@ -106,6 +136,6 @@ If the database becomes bloated or you want to start fresh, navigate to `Configu
 
 Please note that the entirety of this application's codebase was generated by Artificial Intelligence.
 
-The Python backend, Streamlit frontend, Scikit-Learn machine learning logic, PostgreSQL database schema, and Docker deployment configurations were written by an AI assistant (Google's Gemini) based on iterative prompting.
+The Python backend, Streamlit frontend, Scikit-Learn machine learning logic, PostgreSQL database schema, complex LLM Prompt Engineering pipelines, and Docker deployment configurations were written by an AI assistant (Google's Gemini) based on continuous, iterative prompting.
 
-While the code was AI-generated, the system architecture, feature requirements, operational workflow (such as the "Inbox Zero" methodology), and rigorous debugging were orchestrated and directed entirely by a human engineer. This project serves as a practical demonstration of AI-assisted software development and rapid prototyping for critical infrastructure monitoring.
+While the code was AI-generated, the system architecture, feature requirements, NOC operational workflow methodologies, and rigorous hallucination-debugging were orchestrated and directed entirely by a human engineer. This project serves as a practical demonstration of AI-assisted software engineering to rapidly build customized, enterprise-grade critical infrastructure monitoring tools.
