@@ -10,7 +10,7 @@ from sqlalchemy import text
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
 
-from src.database import SessionLocal, Article, FeedSource, Keyword, SystemConfig, engine, init_db, CveItem, RegionalHazard, CloudOutage, User, Role, SavedReport, DailyBriefing
+from src.database import SessionLocal, Article, FeedSource, Keyword, SystemConfig, engine, init_db, CveItem, RegionalHazard, CloudOutage, User, Role, SavedReport, DailyBriefing, ExtractedIOC
 from src.train_model import train 
 from src.scheduler import fetch_feeds
 from src.llm import generate_briefing, generate_bluf, analyze_cascading_impacts, cross_reference_cves, build_custom_intel_report, generate_feed_overview, generate_rolling_summary, generate_daily_fusion_report
@@ -28,19 +28,13 @@ session = get_db()
 LOCAL_TZ = ZoneInfo("America/Chicago")
 cookie_controller = CookieController()
 
-# --- EFFICIENCY UPGRADE: CONNECTION POOL LEAK FIX ---
 def safe_rerun():
-    """Safely closes the database connection before forcing a UI reload to prevent pool exhaustion deadlocks."""
-    try:
-        session.close()
-    except Exception:
-        pass
+    try: session.close()
+    except Exception: pass
     st.rerun()
 
-# --- EFFICIENCY UPGRADE: Metric Caching ---
 @st.cache_data(ttl=60)
 def get_dashboard_metrics():
-    """Fetches top-level metrics from the DB. Cached in RAM for 60 seconds across all user sessions."""
     db_session = SessionLocal()
     try:
         twenty_four_hours_ago = datetime.utcnow() - timedelta(days=1)
@@ -53,10 +47,12 @@ def get_dashboard_metrics():
     finally:
         db_session.close()
 
+# --- MASTER PERMISSIONS LISTS (FIXED FOR NAMERROR) ---
 ALL_POSSIBLE_PAGES = [
     "🌐 Operational Dashboard", 
     "📰 Daily Fusion Report",
     "📡 Threat Telemetry", 
+    "🎯 Threat Hunting & IOCs",  # <--- NEW PAGE ADDED HERE
     "📑 Report Center", 
     "⚙️ Settings & Admin"
 ]
@@ -103,8 +99,7 @@ if st.session_state.current_user is None:
                     cookie_controller.set("noc_session_token", new_token, max_age=30*86400)
                     st.session_state.current_user = user.username
                     st.session_state.current_role = user.role
-                    time.sleep(0.5) 
-                    safe_rerun()
+                    time.sleep(0.5); safe_rerun()
                 else: st.error("❌ Invalid credentials.")
     st.stop() 
 
@@ -130,21 +125,22 @@ st.markdown("""
         [data-testid="stVerticalBlockBorderWrapper"] p, 
         [data-testid="stVerticalBlockBorderWrapper"] li,
         [data-testid="stExpanderDetails"] p,
-        [data-testid="stExpanderDetails"] li { 
-            font-size: 0.9rem !important; 
-            margin-bottom: 0.2rem !important; 
-            line-height: 1.3 !important;
-        }
+        [data-testid="stExpanderDetails"] li { font-size: 0.9rem !important; margin-bottom: 0.2rem !important; line-height: 1.3 !important; }
         hr { margin-top: 0.5rem; margin-bottom: 0.5rem; }
         .stButton>button { padding: 0rem 0.5rem !important; min-height: 2rem !important; }
     </style>
 """, unsafe_allow_html=True)
 
-# ================= GLOBAL UI HELPERS =================
 def get_score_badge(score):
     if score >= 80: return f"🔴 **[{int(score)}]**"
     elif score >= 50: return f"🟠 **[{int(score)}]**"
     else: return f"🔵 **[{int(score)}]**"
+
+def get_cat_icon(cat):
+    if cat == "Cyber": return "💻"
+    elif cat == "Physical/Weather": return "🌪️"
+    elif cat == "Geopolitics/News": return "🌍"
+    return "📰"
 
 def toggle_pin(art_id):
     art = session.query(Article).filter(Article.id == art_id).first()
@@ -175,7 +171,6 @@ sys_config = session.query(SystemConfig).first()
 ai_enabled = sys_config and sys_config.is_active
 
 def render_article_feed(feed_articles, key_prefix=""):
-    """Renders the UI block and guarantees perfect state sync on button clicks."""
     if not feed_articles: 
         st.success("Queue is empty.")
         return
@@ -184,12 +179,10 @@ def render_article_feed(feed_articles, key_prefix=""):
         with st.container(border=True):
             c_title, c_score = st.columns([4, 1])
             c_title.markdown(f"**{get_score_badge(art.score)} [{art.title}]({art.link})**")
-            c_title.caption(f"📅 {format_local_time(art.published_date)} | 📡 {art.source}")
+            c_title.caption(f"📅 {format_local_time(art.published_date)} | 📡 {art.source} | {get_cat_icon(art.category)} {art.category}")
             
-            if art.ai_bluf: 
-                st.success(f"**AI BLUF:** {art.ai_bluf}")
-            else: 
-                st.caption(art.summary[:250] + "..." if art.summary else "No summary.")
+            if art.ai_bluf: st.success(f"**AI BLUF:** {art.ai_bluf}")
+            else: st.caption(art.summary[:250] + "..." if art.summary else "No summary.")
                 
             c1, c2, c3, c4, c5 = st.columns(5)
             c1.button("📍 Unpin" if art.is_pinned else "📌 Pin", key=f"{key_prefix}pin_{art.id}", disabled=not can_pin, on_click=toggle_pin, args=(art.id,))
@@ -201,14 +194,9 @@ def render_article_feed(feed_articles, key_prefix=""):
                 if c5.button("🤖 BLUF", key=f"{key_prefix}bluf_{art.id}", disabled=not can_trigger_ai):
                     with st.spinner("Analyzing..."):
                         b = generate_bluf(art, session)
-                        if b: 
-                            art.ai_bluf = b
-                            session.commit()
-                            safe_rerun()
+                        if b: art.ai_bluf = b; session.commit(); safe_rerun()
 
-# ================= SIDEBAR & NAVIGATION =================
 st.sidebar.title("NOC Fusion")
-
 display_name = current_user_obj.full_name if current_user_obj and current_user_obj.full_name else st.session_state.current_user.capitalize()
 display_title = current_user_obj.job_title if current_user_obj and current_user_obj.job_title else st.session_state.current_role.upper()
 st.sidebar.markdown(f"👤 **{display_name}**\n\n<small>{display_title}</small>", unsafe_allow_html=True)
@@ -244,17 +232,15 @@ PAGES = st.session_state.allowed_pages
 
 if not PAGES: st.error("No assigned permissions."); st.stop()
 if "active_page" not in st.session_state or st.session_state.active_page not in PAGES: st.session_state.active_page = PAGES[0]
-
 selected_page = st.sidebar.radio("Navigation", PAGES, index=PAGES.index(st.session_state.active_page), key="nav_radio")
 if selected_page != st.session_state.active_page: st.session_state.active_page = selected_page; safe_rerun()
 page = st.session_state.active_page
 
 refresh_count = 0
 if refresh_minutes > 0:
-    if page not in ["📑 Report Center", "⚙️ Settings & Admin", "📰 Daily Fusion Report"]:
+    if page not in ["📑 Report Center", "⚙️ Settings & Admin", "📰 Daily Fusion Report", "🎯 Threat Hunting & IOCs"]:
         refresh_count = st_autorefresh(interval=refresh_minutes * 60 * 1000, key="noc_refresh")
 
-# ================= 1. OPERATIONAL DASHBOARD =================
 if page == "🌐 Operational Dashboard":
     st.title("🌐 Operational Dashboard")
     twenty_four_hours_ago = datetime.utcnow() - timedelta(days=1)
@@ -270,7 +256,6 @@ if page == "🌐 Operational Dashboard":
     dash_panels = ["🔥 Threat Triage", "🛡️ Infrastructure Status", "🤖 AI Analysis"]
     if "auto_rotate_dash" not in st.session_state: st.session_state.auto_rotate_dash = True
     c_tog, c_space = st.columns([1, 5])
-    
     auto_rotate = c_tog.toggle("🔄 Auto-Rotate", key="auto_rotate_dash")
 
     calculated_index = refresh_count % len(dash_panels) if auto_rotate else 0
@@ -283,14 +268,14 @@ if page == "🌐 Operational Dashboard":
             st.subheader("📌 Pinned Intel")
             pinned_arts = session.query(Article).filter(Article.is_pinned == True).order_by(Article.published_date.desc()).all()
             for art in pinned_arts:
-                st.markdown(f"{get_score_badge(art.score)} [{art.title}]({art.link}) <br><small>📡 {art.source} | {format_local_time(art.published_date)}</small>", unsafe_allow_html=True)
+                st.markdown(f"{get_score_badge(art.score)} [{art.title}]({art.link}) <br><small>📡 {art.source} | {get_cat_icon(art.category)} {art.category}</small>", unsafe_allow_html=True)
                 if art.ai_bluf: st.success(f"**AI BLUF:** {art.ai_bluf}")
                 st.write("")
         with col_rss:
             st.subheader("🚨 Live Feed (Top 15)")
             top_rss = session.query(Article).filter(Article.published_date >= twenty_four_hours_ago, Article.score >= 50.0, Article.is_pinned == False).order_by(Article.score.desc(), Article.published_date.desc()).limit(15).all()
             for art in top_rss:
-                st.markdown(f"{get_score_badge(art.score)} [{art.title}]({art.link}) <br><small>📡 {art.source} | {format_local_time(art.published_date)}</small>", unsafe_allow_html=True)
+                st.markdown(f"{get_score_badge(art.score)} [{art.title}]({art.link}) <br><small>📡 {art.source} | {get_cat_icon(art.category)} {art.category}</small>", unsafe_allow_html=True)
 
     elif selected_panel == "🛡️ Infrastructure Status":
         col_cve, col_cld, col_reg = st.columns(3)
@@ -322,18 +307,12 @@ if page == "🌐 Operational Dashboard":
                     with st.spinner("🤖 Updating..."):
                         ns = generate_rolling_summary(session)
                         if ns: sys_config.rolling_summary = ns; sys_config.rolling_summary_time = now; session.commit()
-                
                 c_time, c_btn = st.columns([3, 2])
                 c_time.caption(f"Last Sync: {format_local_time(sys_config.rolling_summary_time)}")
                 if c_btn.button("🔄 Force Refresh Briefing", use_container_width=True, disabled=not can_trigger_ai, key="dash_refresh_ai"):
                     with st.spinner("🤖 Forcing AI Summary Update..."):
                         ns = generate_rolling_summary(session)
-                        if ns:
-                            sys_config.rolling_summary = ns
-                            sys_config.rolling_summary_time = datetime.utcnow()
-                            session.commit()
-                            safe_rerun()
-                            
+                        if ns: sys_config.rolling_summary = ns; sys_config.rolling_summary_time = datetime.utcnow(); session.commit(); safe_rerun()
                 st.info(sys_config.rolling_summary if sys_config.rolling_summary else "Initializing...")
             else: st.info("AI Disabled.")
             
@@ -347,7 +326,6 @@ if page == "🌐 Operational Dashboard":
                     if res and ("clear" in res.lower() or "no active" in res.lower()): st.success("✅ " + res)
                     else: st.error(f"⚠️ **MATCH DETECTED:**\n{res}")
 
-# ================= 2. DAILY FUSION REPORT =================
 elif page == "📰 Daily Fusion Report":
     st.title("📰 Daily Master Fusion Report")
     st.markdown("AI-synthesized situational report covering Cyber, Vulnerabilities, Physical Hazards, and Cloud Infrastructure.")
@@ -370,7 +348,6 @@ elif page == "📰 Daily Fusion Report":
         with st.container(border=True): st.markdown(existing_report.content)
     else: st.info("No report generated for yesterday yet.")
 
-# ================= 3. THREAT TELEMETRY =================
 elif page == "📡 Threat Telemetry":
     st.title("📡 Unified Threat Telemetry")
     
@@ -391,6 +368,11 @@ elif page == "📡 Threat Telemetry":
                 col_title, col_btn = st.columns([3, 1])
                 if col_btn.button("🔄 Force Fetch Feeds", use_container_width=True, disabled=not can_sync, key="tt_fetch_feeds"):
                     fetch_feeds(source="User Force"); time.sleep(1); safe_rerun()
+                
+                # --- NEW CATEGORY FILTER UI ---
+                st.write("")
+                cat_filter = st.selectbox("🎯 Filter Active Feeds by Category", ["All", "Cyber", "Physical/Weather", "Geopolitics/News", "General"], key="rss_cat_filter")
+                st.divider()
 
                 def render_paginated_feed(base_query, feed_id, page_size=20):
                     state_key = f"page_{feed_id}"
@@ -399,9 +381,7 @@ elif page == "📡 Threat Telemetry":
                     total_items = base_query.count()
                     total_pages = max(1, (total_items + page_size - 1) // page_size)
                     
-                    if st.session_state[state_key] > total_pages: 
-                        st.session_state[state_key] = max(1, total_pages)
-                        
+                    if st.session_state[state_key] > total_pages: st.session_state[state_key] = max(1, total_pages)
                     current_page = st.session_state[state_key]
                     
                     def pagination_controls(loc):
@@ -415,35 +395,31 @@ elif page == "📡 Threat Telemetry":
                             if st.button("Next ➡️", key=f"next_{feed_id}_{loc}", disabled=(current_page >= total_pages), use_container_width=True):
                                 st.session_state[state_key] += 1; safe_rerun()
 
-                    if total_items > page_size: 
-                        pagination_controls("top")
-                        st.divider()
-                    elif total_items == 0:
-                        st.info("No articles found matching this criteria.")
-                        return
+                    if total_items > page_size: pagination_controls("top"); st.divider()
+                    elif total_items == 0: st.info("No articles found matching this criteria."); return
                     
                     offset = (current_page - 1) * page_size
                     items = base_query.offset(offset).limit(page_size).all()
-                    
                     render_article_feed(items, key_prefix=f"{feed_id}_")
                     
-                    if total_items > page_size: 
-                        st.divider()
-                        pagination_controls("bottom")
+                    if total_items > page_size: st.divider(); pagination_controls("bottom")
 
                 sub_tab_pinned, sub_tab_live, sub_tab_low, sub_tab_search = st.tabs(["📌 Pinned", "📡 Live Feed (>50)", "📉 Below Threshold (<50)", "🔍 Deep Search"])
                 
                 with sub_tab_pinned:
-                    q_pinned = session.query(Article).filter(Article.is_pinned == True).order_by(Article.published_date.desc())
-                    render_paginated_feed(q_pinned, feed_id="pinned", page_size=10)
+                    q_pinned = session.query(Article).filter(Article.is_pinned == True)
+                    if cat_filter != "All": q_pinned = q_pinned.filter(Article.category == cat_filter)
+                    render_paginated_feed(q_pinned.order_by(Article.published_date.desc()), feed_id="pinned", page_size=10)
 
                 with sub_tab_live: 
-                    q_live = session.query(Article).filter(Article.score >= 50.0, Article.is_pinned == False).order_by(Article.published_date.desc())
-                    render_paginated_feed(q_live, feed_id="live", page_size=20)
+                    q_live = session.query(Article).filter(Article.score >= 50.0, Article.is_pinned == False)
+                    if cat_filter != "All": q_live = q_live.filter(Article.category == cat_filter)
+                    render_paginated_feed(q_live.order_by(Article.published_date.desc()), feed_id="live", page_size=20)
                     
                 with sub_tab_low: 
-                    q_low = session.query(Article).filter(Article.score < 50.0, Article.is_pinned == False).order_by(Article.published_date.desc())
-                    render_paginated_feed(q_low, feed_id="low", page_size=20)
+                    q_low = session.query(Article).filter(Article.score < 50.0, Article.is_pinned == False)
+                    if cat_filter != "All": q_low = q_low.filter(Article.category == cat_filter)
+                    render_paginated_feed(q_low.order_by(Article.published_date.desc()), feed_id="low", page_size=20)
                     
                 with sub_tab_search:
                     s1, s2, s3 = st.columns([2, 1, 1])
@@ -452,9 +428,8 @@ elif page == "📡 Threat Telemetry":
                     page_size_sel = s3.selectbox("Items per Page", [10, 20, 50], index=1, key="tt_search_lim")
                     
                     q_search = session.query(Article).filter(Article.score >= min_score)
-                    if search_term: 
-                        q_search = q_search.filter(Article.title.ilike(f"%{search_term}%") | Article.summary.ilike(f"%{search_term}%"))
-                    
+                    if search_term: q_search = q_search.filter(Article.title.ilike(f"%{search_term}%") | Article.summary.ilike(f"%{search_term}%"))
+                    if cat_filter != "All": q_search = q_search.filter(Article.category == cat_filter)
                     render_paginated_feed(q_search.order_by(Article.score.desc(), Article.published_date.desc()), feed_id="search", page_size=page_size_sel)
             tab_idx += 1
             
@@ -501,6 +476,112 @@ elif page == "📡 Threat Telemetry":
                         st.markdown(f"**Area:** {haz.location}\n\n{haz.description}")
             tab_idx += 1
 
+# ================= NEW MODULE: THREAT HUNTING & IOCS =================
+elif page == "🎯 Threat Hunting & IOCs":
+    st.title("🎯 Active Threat Hunting")
+    st.markdown("Automated IOC extraction and LLM-assisted deep scanning for specific threat actors, malwares, or target infrastructure.")
+    
+    tab_matrix, tab_manual = st.tabs(["🧮 Live IOC Matrix", "🔬 Manual Deep Hunt (LLM)"])
+    
+    with tab_matrix:
+        st.subheader("Global Indicators of Compromise (Last 72 Hours)")
+        st.caption("Auto-extracted via Regex from ML-verified (Score > 50) Cyber Intelligence feeds only.")
+        
+        seventy_two_hrs_ago = datetime.utcnow() - timedelta(days=3)
+        recent_iocs = session.query(ExtractedIOC).filter(ExtractedIOC.detected_at >= seventy_two_hrs_ago).order_by(ExtractedIOC.detected_at.desc()).all()
+        
+        if not recent_iocs:
+            st.info("No active IOCs extracted in the last 72 hours.")
+        else:
+            ioc_data = []
+            for ioc in recent_iocs:
+                art = session.query(Article).filter(Article.id == ioc.article_id).first()
+                source_link = art.link if art else "Unknown"
+                ioc_data.append({
+                    "Type": ioc.indicator_type,
+                    "Indicator": ioc.indicator_value,
+                    "Source Article": source_link,
+                    "Detected": format_local_time(ioc.detected_at)
+                })
+            
+            df = pd.DataFrame(ioc_data)
+            
+            col_filter1, col_filter2 = st.columns(2)
+            filter_type = col_filter1.multiselect("Filter by Type", ["IPv4", "SHA256", "MD5", "CVE"], default=["IPv4", "SHA256", "MD5", "CVE"])
+            
+            filtered_df = df[df["Type"].isin(filter_type)]
+            
+            st.dataframe(
+                filtered_df, 
+                use_container_width=True, 
+                column_config={"Source Article": st.column_config.LinkColumn("Source")},
+                hide_index=True
+            )
+            
+            st.download_button(
+                label="📥 Export IOCs (CSV)",
+                data=filtered_df.to_csv(index=False).encode('utf-8'),
+                file_name=f"IOC_Export_{datetime.now(LOCAL_TZ).strftime('%Y%m%d')}.csv",
+                mime='text/csv',
+                use_container_width=True
+            )
+
+    with tab_manual:
+        st.subheader("Targeted LLM Deep Hunt")
+        st.markdown("Search the historical database for a specific threat and use the AI to generate YARA patterns, SIEM queries, and TTP assessments.")
+        
+        with st.form("manual_hunt_form"):
+            hunt_target = st.text_input("Target Entity (e.g., 'Volt Typhoon', 'Ivanti Connect Secure', 'RansomHub')")
+            hunt_depth = st.slider("Historical Depth (Days)", min_value=7, max_value=90, value=30)
+            
+            if st.form_submit_button("🚀 Execute Deep Hunt", type="primary", disabled=not can_trigger_ai):
+                if not hunt_target:
+                    st.error("Please enter a target entity.")
+                elif not ai_enabled:
+                    st.error("AI Engine is currently disabled in settings.")
+                else:
+                    with st.spinner(f"Scanning the last {hunt_depth} days of telemetry for '{hunt_target}'..."):
+                        cutoff_date = datetime.utcnow() - timedelta(days=hunt_depth)
+                        target_arts = session.query(Article).filter(
+                            Article.published_date >= cutoff_date,
+                            (Article.title.ilike(f"%{hunt_target}%") | Article.summary.ilike(f"%{hunt_target}%"))
+                        ).limit(30).all()
+                        
+                        if not target_arts:
+                            st.warning(f"No intelligence found matching '{hunt_target}' in the requested timeframe.")
+                        else:
+                            st.success(f"Found {len(target_arts)} distinct reports. Handing off to AI for synthesis...")
+                            
+                            hunt_context = "\n\n".join([f"Source: {a.source}\nTitle: {a.title}\nContent: {a.summary}" for a in target_arts])
+                            
+                            sys_prompt = f"""You are an elite Cyber Threat Hunter. Analyze the provided intelligence reports regarding '{hunt_target}'.
+                            Synthesize the data and generate an actionable Threat Hunt Package.
+                            
+                            Your output MUST strictly follow this Markdown structure:
+                            ### 1. Threat Overview & TTPs
+                            (Briefly summarize how this threat operates)
+                            
+                            ### 2. Known Targets & Vulnerabilities
+                            (List specific systems or CVEs targeted)
+                            
+                            ### 3. Hunt Queries & Detection Logic
+                            (Provide conceptual SIEM queries, Splunk logic, or YARA rules based on the intelligence)
+                            
+                            Do not hallucinate. Base your response ONLY on the provided text."""
+                            
+                            messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": hunt_context}]
+                            
+                            from src.llm import call_llm
+                            ai_hunt_result = call_llm(messages, sys_config, temperature=0.1)
+                            
+                            if ai_hunt_result:
+                                st.divider()
+                                st.markdown(f"## 🎯 Hunt Package: {hunt_target.upper()}")
+                                st.markdown(ai_hunt_result)
+                                st.divider()
+                                st.markdown("### 🔗 Reference Intel")
+                                for a in target_arts: st.markdown(f"- [{a.title}]({a.link})")
+
 # ================= 4. REPORT CENTER =================
 elif page == "📑 Report Center":
     st.title("📑 Report Center")
@@ -538,13 +619,11 @@ elif page == "📑 Report Center":
                     cm1, cm2 = st.columns(2)
                     aname = cm1.text_input("Analyst", value=dn, key="rc_aname")
                     cinfo = cm2.text_input("Contact", value=dc, key="rc_cinfo")
-                    
                     msys = st.text_area("Manual Systems (Optional)", height=80, key="rc_msys")
                     obj = st.text_area("AI Objective", value="Generate an exhaustive, detailed technical intelligence report.", height=80, key="rc_obj")
                     
                     if st.button("🚀 Generate Report", type="primary", disabled=not can_trigger_ai, key="rc_gen_btn"):
-                        if not sels: 
-                            st.error("Select at least one article.")
+                        if not sels: st.error("Select at least one article.")
                         else:
                             arts = [amap[t] for t in sels]
                             with st.spinner("Synthesizing Intelligence..."):
@@ -552,14 +631,10 @@ elif page == "📑 Report Center":
                                 if md:
                                     now = datetime.now(LOCAL_TZ).strftime("%A, %B %d, %Y at %I:%M %p %Z")
                                     mr = f"# 🛡️ NOC Intelligence Report\n**Date:** {now}\n**Analyst:** {aname}\n**Contact:** {cinfo}\n\n---\n\n"
-                                    if msys.strip(): 
-                                        mr += f"## 🎯 Internal Systems (Manual Entry)\n{msys}\n\n---\n\n"
-                                    
+                                    if msys.strip(): mr += f"## 🎯 Internal Systems (Manual Entry)\n{msys}\n\n---\n\n"
                                     mr += md
                                     mr += "\n\n---\n\n## 🔗 Intelligence Sources\n"
-                                    for a in arts:
-                                        mr += f"- **{a.source}**: [{a.title}]({a.link})\n"
-
+                                    for a in arts: mr += f"- **{a.source}**: [{a.title}]({a.link})\n"
                                     st.session_state.generated_report = mr
                                     st.success("Complete!")
 
@@ -610,8 +685,7 @@ elif page == "⚙️ Settings & Admin":
                             word = parts[0].strip().lower()
                             weight = int(parts[1].strip()) if len(parts) > 1 and parts[1].strip().isdigit() else 10
                             if not session.query(Keyword).filter_by(word=word).first(): session.add(Keyword(word=word, weight=weight))
-                    session.commit()
-                    safe_rerun()
+                    session.commit(); safe_rerun()
             with st.expander("Active Keywords"):
                 for k in session.query(Keyword).order_by(Keyword.weight.desc()).all():
                     c_a, c_b, c_c = st.columns([3, 1, 1])
@@ -629,8 +703,7 @@ elif page == "⚙️ Settings & Admin":
                             url = parts[0].strip()
                             name = parts[1].strip() if len(parts) > 1 else "New Feed"
                             if not session.query(FeedSource).filter_by(url=url).first(): session.add(FeedSource(url=url, name=name))
-                    session.commit()
-                    safe_rerun()
+                    session.commit(); safe_rerun()
             with st.expander("Active Feeds"):
                 for s in session.query(FeedSource).all():
                     st.text(s.name); st.caption(s.url)
@@ -747,31 +820,48 @@ elif page == "⚙️ Settings & Admin":
     with tab_danger:
         st.error("Database Maintenance & Irreversible Actions")
         col1, col2, col3 = st.columns(3)
-        
         with col1:
             st.write("**Routine Maintenance**")
-            st.caption("Safely sweeps stale >48h alerts & >30-day intel.")
+            st.caption("Safely sweeps stale alerts & intel.")
             if st.button("🧹 Run Garbage Collector", use_container_width=True, key="set_danger_gc"):
                 with st.spinner("Purging stale data and vacuuming database..."):
                     from src.scheduler import run_database_maintenance
                     run_database_maintenance()
-                    st.success("✅ Database swept and optimized!")
-                    time.sleep(1)
+                    st.success("✅ Swept and optimized!"); time.sleep(1); safe_rerun()
+            
+            # --- NEW DATA MIGRATION BUTTON ---
+            st.write("**Data Migration**")
+            st.caption("Applies new categories to historical 'General' data.")
+            if st.button("🔄 Recategorize Old Articles", use_container_width=True, key="set_danger_recat"):
+                with st.spinner("Scanning historical database..."):
+                    from src.categorizer import categorize_text
+                    # Fetch all articles currently sitting in the default category
+                    arts = session.query(Article).filter(Article.category == "General").all()
+                    updated_count = 0
+                    
+                    for a in arts:
+                        full_text = f"{a.title} {a.summary}"
+                        new_cat = categorize_text(full_text)
+                        if new_cat != "General":
+                            a.category = new_cat
+                            updated_count += 1
+                            
+                    session.commit()
+                    st.success(f"✅ Successfully recategorized {updated_count} historical articles!")
+                    time.sleep(2)
                     safe_rerun()
                     
         with col2:
             st.write("**Clear History**")
-            st.caption("Deletes all articles, keeping feeds/users.")
+            st.caption("Deletes all articles & IOCs.")
             if st.button("🗑️ Delete All Articles", use_container_width=True, key="set_danger_clear"):
-                session.execute(text("TRUNCATE TABLE articles RESTART IDENTITY CASCADE;"))
+                session.execute(text("TRUNCATE TABLE articles, extracted_iocs RESTART IDENTITY CASCADE;"))
                 session.commit(); safe_rerun()
-                
         with col3:
             st.write("**Factory Reset**")
-            st.caption("Destroys all intel, keywords, and feeds.")
+            st.caption("Destroys all data entirely.")
             if st.button("☢️ FULL RESET", use_container_width=True, key="set_danger_factory"):
-                session.execute(text("TRUNCATE TABLE articles, feed_sources, keywords RESTART IDENTITY CASCADE;"))
+                session.execute(text("TRUNCATE TABLE articles, extracted_iocs, feed_sources, keywords RESTART IDENTITY CASCADE;"))
                 session.commit(); safe_rerun()
 
-# This acts as the final cleanup for any run where a button IS NOT clicked.
 session.close()

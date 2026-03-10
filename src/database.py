@@ -7,11 +7,7 @@ from datetime import datetime
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@db:5432/rss_db")
 
 engine = create_engine(
-    DATABASE_URL,
-    pool_size=20,          # Allow up to 20 concurrent threads to write at the same time
-    max_overflow=30,       # Allow an extra 30 overflow connections during massive spikes
-    pool_pre_ping=True,    # Automatically test and drop dead connections 
-    pool_recycle=3600      # Force-refresh connections every hour to prevent memory leaks
+    DATABASE_URL, pool_size=20, max_overflow=30, pool_pre_ping=True, pool_recycle=3600
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -61,17 +57,25 @@ class Article(Base):
     title = Column(String)
     link = Column(String, unique=True, index=True)
     summary = Column(Text)
-    # --- EFFICIENCY UPGRADE: Indexing ---
     published_date = Column(DateTime, default=datetime.utcnow, index=True)
     source = Column(String)
     score = Column(Float, default=0.0, index=True)
-    # ------------------------------------
+    category = Column(String, default="General", index=True) # NEW CATEGORY FIELD
     keywords_found = Column(JSON)
     is_bubbled = Column(Boolean, default=False)
     story_group = Column(String, nullable=True) 
     human_feedback = Column(Integer, default=0) 
     ai_bluf = Column(Text, nullable=True)
     is_pinned = Column(Boolean, default=False)
+
+class ExtractedIOC(Base):
+    __tablename__ = "extracted_iocs"
+    id = Column(Integer, primary_key=True, index=True)
+    article_id = Column(Integer, index=True)
+    indicator_type = Column(String, index=True)
+    indicator_value = Column(String, index=True)
+    context = Column(Text, nullable=True)
+    detected_at = Column(DateTime, default=datetime.utcnow)
 
 class SystemConfig(Base):
     __tablename__ = "system_config"
@@ -140,8 +144,12 @@ def init_db():
         "ALTER TABLE users ADD COLUMN full_name VARCHAR;",
         "ALTER TABLE users ADD COLUMN job_title VARCHAR;",
         "ALTER TABLE users ADD COLUMN contact_info VARCHAR;",
+        "ALTER TABLE articles ADD COLUMN category VARCHAR DEFAULT 'General';",
         "CREATE INDEX IF NOT EXISTS ix_articles_published_date ON articles (published_date);",
-        "CREATE INDEX IF NOT EXISTS ix_articles_score ON articles (score);"
+        "CREATE INDEX IF NOT EXISTS ix_articles_score ON articles (score);",
+        "CREATE INDEX IF NOT EXISTS ix_articles_category ON articles (category);",
+        "CREATE TABLE IF NOT EXISTS extracted_iocs (id SERIAL PRIMARY KEY, article_id INTEGER, indicator_type VARCHAR, indicator_value VARCHAR, context TEXT, detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);",
+        "CREATE INDEX IF NOT EXISTS ix_extracted_iocs_article_id ON extracted_iocs (article_id);"
     ]
     
     for sql in migrations:
@@ -156,14 +164,14 @@ def init_db():
     
     all_pages = [
         "🌐 Operational Dashboard", 
-        "📰 Daily Fusion Report", 
+        "📰 Daily Fusion Report",
         "📡 Threat Telemetry", 
+        "🎯 Threat Hunting & IOCs", # NEW PAGE
         "📑 Report Center", 
         "⚙️ Settings & Admin"
     ]
     all_actions = [
-        "action_pin", "action_train_ml", "action_boost_threat", 
-        "action_trigger_ai", "action_sync_data",
+        "action_pin", "action_train_ml", "action_boost_threat", "action_trigger_ai", "action_sync_data",
         "tab_tt_rss", "tab_tt_kev", "tab_tt_cloud", "tab_tt_infra",
         "tab_rc_build", "tab_rc_lib"
     ]
@@ -195,6 +203,5 @@ def init_db():
             contact_info="NOC Desk"
         ))
         session.commit()
-        print("✅ Default admin created.")
         
     session.close()
