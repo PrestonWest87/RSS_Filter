@@ -92,17 +92,17 @@ Route Webhooks: Point your external monitoring tools (SolarWinds, Datadog, PRTG)
 
 ## 🛠️ Troubleshooting & Commands
 
-###View Live Worker Logs:
+### View Live Worker Logs:
 ```Bash
 
 docker compose logs -f worker
 ```
-###View Webhook Gateway Logs (Useful for tuning NLP matching):
+### View Webhook Gateway Logs (Useful for tuning NLP matching):
 ```Bash
 
 docker compose logs -f webhook
 ```
-###Manual Database Vacuum & Cleanup:
+### Manual Database Vacuum & Cleanup:
 If the dashboard feels sluggish after importing massive data feeds, navigate to Settings & Admin > ⚠️ Danger Zone and click 🧹 Run Garbage Collector to force a PostgreSQL dead-tuple sweep.
 
 ---
