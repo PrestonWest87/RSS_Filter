@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from src.cve_worker import fetch_cisa_kev
 from src.infra_worker import fetch_regional_hazards
 from src.cloud_worker import fetch_cloud_outages
+from src.telemetry_worker import run_telemetry_sync
 
 init_db()
 
@@ -177,7 +178,8 @@ if __name__ == "__main__":
     schedule.every(60).minutes.do(run_database_maintenance)
     schedule.every(15).minutes.do(fetch_feeds)
     schedule.every(5).minutes.do(job_regional)
-    schedule.every(15).minutes.do(job_cloud)
+    schedule.every(5).minutes.do(job_cloud)
+    schedule.every(5).minutes.do(run_telemetry_sync)
     schedule.every(6).hours.do(job_cisa)
     
     fetch_feeds(source="Worker Boot")

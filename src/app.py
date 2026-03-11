@@ -10,10 +10,11 @@ from sqlalchemy import text
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
 
-from src.database import SessionLocal, Article, FeedSource, Keyword, SystemConfig, engine, init_db, CveItem, RegionalHazard, CloudOutage, User, Role, SavedReport, DailyBriefing, ExtractedIOC
+from src.database import SessionLocal, Article, FeedSource, Keyword, SystemConfig, engine, init_db, CveItem, RegionalHazard, CloudOutage, User, Role, SavedReport, DailyBriefing, ExtractedIOC, MonitoredLocation, SolarWindsAlert, TimelineEvent, RegionalOutage, NodeAlias
 from src.train_model import train 
 from src.scheduler import fetch_feeds
 from src.llm import generate_briefing, generate_bluf, analyze_cascading_impacts, cross_reference_cves, build_custom_intel_report, generate_feed_overview, generate_rolling_summary, generate_daily_fusion_report
+from shapely.geometry import Point
 
 @st.cache_resource
 def setup_database():
@@ -47,12 +48,12 @@ def get_dashboard_metrics():
     finally:
         db_session.close()
 
-# --- MASTER PERMISSIONS LISTS (FIXED FOR NAMERROR) ---
 ALL_POSSIBLE_PAGES = [
     "🌐 Operational Dashboard", 
     "📰 Daily Fusion Report",
     "📡 Threat Telemetry", 
-    "🎯 Threat Hunting & IOCs",  # <--- NEW PAGE ADDED HERE
+    "🎯 Threat Hunting & IOCs",
+    "⚡ AIOps RCA", 
     "📑 Report Center", 
     "⚙️ Settings & Admin"
 ]
@@ -63,7 +64,6 @@ ALL_POSSIBLE_ACTIONS = [
     "tab_rc_build", "tab_rc_lib"
 ]
 
-# ================= AUTHENTICATION WALL =================
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
     st.session_state.current_role = None
@@ -79,6 +79,9 @@ if st.session_state.current_user is None:
             st.session_state.current_role = user.role
             role_obj = session.query(Role).filter(Role.name == user.role).first()
             if role_obj:
+                if "⚡ AIOps RCA (Staging)" in role_obj.allowed_pages:
+                    role_obj.allowed_pages = [p if p != "⚡ AIOps RCA (Staging)" else "⚡ AIOps RCA" for p in role_obj.allowed_pages]
+                    session.commit()
                 st.session_state.allowed_pages = role_obj.allowed_pages
                 st.session_state.allowed_actions = role_obj.allowed_actions or []
             safe_rerun()
@@ -90,7 +93,7 @@ if st.session_state.current_user is None:
         with st.form("login_form"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
-            if st.form_submit_button("Authenticate", use_container_width=True):
+            if st.form_submit_button("Authenticate", width="stretch"):
                 user = session.query(User).filter(User.username == username).first()
                 if user and bcrypt.checkpw(password.encode('utf-8'), user.password_hash.encode('utf-8')):
                     new_token = str(uuid.uuid4())
@@ -105,6 +108,9 @@ if st.session_state.current_user is None:
 
 role_obj = session.query(Role).filter(Role.name == st.session_state.current_role).first()
 if role_obj:
+    if "⚡ AIOps RCA (Staging)" in role_obj.allowed_pages:
+        role_obj.allowed_pages = [p if p != "⚡ AIOps RCA (Staging)" else "⚡ AIOps RCA" for p in role_obj.allowed_pages]
+        session.commit()
     st.session_state.allowed_pages = role_obj.allowed_pages
     st.session_state.allowed_actions = role_obj.allowed_actions or []
 
@@ -152,7 +158,7 @@ def boost_score(art_id, amount=15):
 
 def format_local_time(utc_dt):
     if not utc_dt: return "Unknown"
-    return utc_dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M')
+    return utc_dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(LOCAL_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
 def change_status(art_id, new_feedback, bubble_status=None):
     art = session.query(Article).filter(Article.id == art_id).first()
@@ -201,7 +207,7 @@ display_name = current_user_obj.full_name if current_user_obj and current_user_o
 display_title = current_user_obj.job_title if current_user_obj and current_user_obj.job_title else st.session_state.current_role.upper()
 st.sidebar.markdown(f"👤 **{display_name}**\n\n<small>{display_title}</small>", unsafe_allow_html=True)
 
-if st.sidebar.button("🚪 Log Out", use_container_width=True):
+if st.sidebar.button("🚪 Log Out", width="stretch"):
     if current_user_obj: current_user_obj.session_token = None
     session.commit()
     cookie_controller.remove("noc_session_token")
@@ -216,7 +222,7 @@ with st.sidebar.expander("📝 My Profile"):
         st.divider()
         old_pwd = st.text_input("Current Password", type="password")
         new_pwd = st.text_input("New Password", type="password")
-        if st.form_submit_button("Save Profile", use_container_width=True):
+        if st.form_submit_button("Save Profile", width="stretch"):
             current_user_obj.full_name = new_fn; current_user_obj.job_title = new_jt; current_user_obj.contact_info = new_ci
             if new_pwd:
                 if bcrypt.checkpw(old_pwd.encode('utf-8'), current_user_obj.password_hash.encode('utf-8')):
@@ -226,21 +232,38 @@ with st.sidebar.expander("📝 My Profile"):
             else: st.success("Updated!")
             session.commit(); time.sleep(0.5); safe_rerun()
 
+# --- CONTEXT AWARE NAVIGATION & REFRESH ---
 st.sidebar.divider()
-refresh_minutes = st.sidebar.number_input("🔄 Auto-Refresh (Mins)", min_value=0, max_value=60, value=2, key="sidebar_refresh_mins")
 PAGES = st.session_state.allowed_pages
 
 if not PAGES: st.error("No assigned permissions."); st.stop()
 if "active_page" not in st.session_state or st.session_state.active_page not in PAGES: st.session_state.active_page = PAGES[0]
+
+# Render Navigation First
 selected_page = st.sidebar.radio("Navigation", PAGES, index=PAGES.index(st.session_state.active_page), key="nav_radio")
 if selected_page != st.session_state.active_page: st.session_state.active_page = selected_page; safe_rerun()
 page = st.session_state.active_page
 
+st.sidebar.divider()
 refresh_count = 0
-if refresh_minutes > 0:
-    if page not in ["📑 Report Center", "⚙️ Settings & Admin", "📰 Daily Fusion Report", "🎯 Threat Hunting & IOCs"]:
-        refresh_count = st_autorefresh(interval=refresh_minutes * 60 * 1000, key="noc_refresh")
+current_refresh_sec = 0
 
+# Render Page-Specific Refresh Controls
+if page == "⚡ AIOps RCA":
+    refresh_rate = st.sidebar.selectbox("🔴 RCA Live Sync", ["5 Seconds", "10 Seconds", "30 Seconds", "Paused"], index=0, key="aiops_refresh")
+    rmap = {"5 Seconds": 5, "10 Seconds": 10, "30 Seconds": 30, "Paused": 0}
+    current_refresh_sec = rmap[refresh_rate]
+    if current_refresh_sec > 0:
+        refresh_count = st_autorefresh(interval=current_refresh_sec * 1000, key="aiops_timer")
+        
+elif page == "🌐 Operational Dashboard":
+    refresh_rate = st.sidebar.selectbox("🔄 Dashboard Refresh", ["Off", "1 Minute", "2 Minutes", "5 Minutes"], index=2, key="dash_refresh")
+    rmap = {"Off": 0, "1 Minute": 60, "2 Minutes": 120, "5 Minutes": 300}
+    current_refresh_sec = rmap[refresh_rate]
+    if current_refresh_sec > 0:
+        refresh_count = st_autorefresh(interval=current_refresh_sec * 1000, key="dash_timer")
+
+# ================= 1. OPERATIONAL DASHBOARD =================
 if page == "🌐 Operational Dashboard":
     st.title("🌐 Operational Dashboard")
     twenty_four_hours_ago = datetime.utcnow() - timedelta(days=1)
@@ -309,7 +332,7 @@ if page == "🌐 Operational Dashboard":
                         if ns: sys_config.rolling_summary = ns; sys_config.rolling_summary_time = now; session.commit()
                 c_time, c_btn = st.columns([3, 2])
                 c_time.caption(f"Last Sync: {format_local_time(sys_config.rolling_summary_time)}")
-                if c_btn.button("🔄 Force Refresh Briefing", use_container_width=True, disabled=not can_trigger_ai, key="dash_refresh_ai"):
+                if c_btn.button("🔄 Force Refresh Briefing", width="stretch", disabled=not can_trigger_ai, key="dash_refresh_ai"):
                     with st.spinner("🤖 Forcing AI Summary Update..."):
                         ns = generate_rolling_summary(session)
                         if ns: sys_config.rolling_summary = ns; sys_config.rolling_summary_time = datetime.utcnow(); session.commit(); safe_rerun()
@@ -319,13 +342,14 @@ if page == "🌐 Operational Dashboard":
         with col_ai2:
             st.subheader("🤖 Security Auditor")
             st.caption("Checks active tech stack against KEVs.")
-            if st.button("Scan Stack Against 30-Day KEVs", use_container_width=True, disabled=not can_trigger_ai, key="dash_scan_stack"):
+            if st.button("Scan Stack Against 30-Day KEVs", width="stretch", disabled=not can_trigger_ai, key="dash_scan_stack"):
                 with st.spinner("Scanning..."):
                     cves = session.query(CveItem).filter(CveItem.date_added >= datetime.utcnow() - timedelta(days=30)).all()
                     res = cross_reference_cves(cves, session)
                     if res and ("clear" in res.lower() or "no active" in res.lower()): st.success("✅ " + res)
                     else: st.error(f"⚠️ **MATCH DETECTED:**\n{res}")
 
+# ================= 2. DAILY FUSION REPORT =================
 elif page == "📰 Daily Fusion Report":
     st.title("📰 Daily Master Fusion Report")
     st.markdown("AI-synthesized situational report covering Cyber, Vulnerabilities, Physical Hazards, and Cloud Infrastructure.")
@@ -333,7 +357,7 @@ elif page == "📰 Daily Fusion Report":
     existing_report = session.query(DailyBriefing).filter(DailyBriefing.report_date == yesterday_local).first()
     
     col1, col2 = st.columns([3, 1])
-    if col2.button("🤖 Generate Yesterday's Report", use_container_width=True, type="primary", disabled=not can_trigger_ai, key="br_gen_report"):
+    if col2.button("🤖 Generate Yesterday's Report", width="stretch", type="primary", disabled=not can_trigger_ai, key="br_gen_report"):
         if not ai_enabled: st.error("AI is disabled.")
         else:
             with st.spinner("Processing massive datasets..."):
@@ -348,6 +372,7 @@ elif page == "📰 Daily Fusion Report":
         with st.container(border=True): st.markdown(existing_report.content)
     else: st.info("No report generated for yesterday yet.")
 
+# ================= 3. THREAT TELEMETRY =================
 elif page == "📡 Threat Telemetry":
     st.title("📡 Unified Threat Telemetry")
     
@@ -366,10 +391,9 @@ elif page == "📡 Threat Telemetry":
         if "tab_tt_rss" in st.session_state.allowed_actions:
             with tabs[tab_idx]:
                 col_title, col_btn = st.columns([3, 1])
-                if col_btn.button("🔄 Force Fetch Feeds", use_container_width=True, disabled=not can_sync, key="tt_fetch_feeds"):
+                if col_btn.button("🔄 Force Fetch Feeds", width="stretch", disabled=not can_sync, key="tt_fetch_feeds"):
                     fetch_feeds(source="User Force"); time.sleep(1); safe_rerun()
                 
-                # --- NEW CATEGORY FILTER UI ---
                 st.write("")
                 cat_filter = st.selectbox("🎯 Filter Active Feeds by Category", ["All", "Cyber", "Physical/Weather", "Geopolitics/News", "General"], key="rss_cat_filter")
                 st.divider()
@@ -377,22 +401,20 @@ elif page == "📡 Threat Telemetry":
                 def render_paginated_feed(base_query, feed_id, page_size=20):
                     state_key = f"page_{feed_id}"
                     if state_key not in st.session_state: st.session_state[state_key] = 1
-                    
                     total_items = base_query.count()
                     total_pages = max(1, (total_items + page_size - 1) // page_size)
-                    
                     if st.session_state[state_key] > total_pages: st.session_state[state_key] = max(1, total_pages)
                     current_page = st.session_state[state_key]
                     
                     def pagination_controls(loc):
                         col1, col2, col3 = st.columns([1, 2, 1])
                         with col1:
-                            if st.button("⬅️ Previous", key=f"prev_{feed_id}_{loc}", disabled=(current_page <= 1), use_container_width=True):
+                            if st.button("⬅️ Previous", key=f"prev_{feed_id}_{loc}", disabled=(current_page <= 1), width="stretch"):
                                 st.session_state[state_key] -= 1; safe_rerun()
                         with col2:
                             st.markdown(f"<div style='text-align: center; margin-top: 0.4rem;'><b>Page {current_page} of {total_pages}</b> <span style='font-size: 0.85em; color: gray;'>(Total: {total_items})</span></div>", unsafe_allow_html=True)
                         with col3:
-                            if st.button("Next ➡️", key=f"next_{feed_id}_{loc}", disabled=(current_page >= total_pages), use_container_width=True):
+                            if st.button("Next ➡️", key=f"next_{feed_id}_{loc}", disabled=(current_page >= total_pages), width="stretch"):
                                 st.session_state[state_key] += 1; safe_rerun()
 
                     if total_items > page_size: pagination_controls("top"); st.divider()
@@ -401,7 +423,6 @@ elif page == "📡 Threat Telemetry":
                     offset = (current_page - 1) * page_size
                     items = base_query.offset(offset).limit(page_size).all()
                     render_article_feed(items, key_prefix=f"{feed_id}_")
-                    
                     if total_items > page_size: st.divider(); pagination_controls("bottom")
 
                 sub_tab_pinned, sub_tab_live, sub_tab_low, sub_tab_search = st.tabs(["📌 Pinned", "📡 Live Feed (>50)", "📉 Below Threshold (<50)", "🔍 Deep Search"])
@@ -426,7 +447,6 @@ elif page == "📡 Threat Telemetry":
                     search_term = s1.text_input("Search (Keywords or Source)", key="tt_search_kw")
                     min_score = s2.number_input("Min Score", value=0, key="tt_search_min")
                     page_size_sel = s3.selectbox("Items per Page", [10, 20, 50], index=1, key="tt_search_lim")
-                    
                     q_search = session.query(Article).filter(Article.score >= min_score)
                     if search_term: q_search = q_search.filter(Article.title.ilike(f"%{search_term}%") | Article.summary.ilike(f"%{search_term}%"))
                     if cat_filter != "All": q_search = q_search.filter(Article.category == cat_filter)
@@ -435,7 +455,7 @@ elif page == "📡 Threat Telemetry":
             
         if "tab_tt_kev" in st.session_state.allowed_actions:
             with tabs[tab_idx]:
-                if st.button("🔄 Sync CISA KEV", disabled=not can_sync, key="tt_sync_kev"):
+                if st.button("🔄 Sync CISA KEV", disabled=not can_sync, key="tt_sync_kev", width="stretch"):
                     with st.spinner("Pulling..."):
                         from src.cve_worker import fetch_cisa_kev; fetch_cisa_kev(); time.sleep(1); safe_rerun()
                 db = st.radio("Filter:", ["7 Days", "30 Days", "Archive"], horizontal=True, key="tt_vuln_db")
@@ -449,34 +469,225 @@ elif page == "📡 Threat Telemetry":
             
         if "tab_tt_cloud" in st.session_state.allowed_actions:
             with tabs[tab_idx]:
-                if st.button("🔄 Sync Cloud Status", disabled=not can_sync, key="tt_sync_cloud"):
-                    with st.spinner("Pulling..."):
+                if st.button("🔄 Sync Cloud Status", disabled=not can_sync, key="tt_sync_cloud", width="stretch"):
+                    with st.spinner("Pulling data from Global Providers..."):
                         from src.cloud_worker import fetch_cloud_outages; fetch_cloud_outages(); time.sleep(1); safe_rerun()
-                sa, sg, sz, sc = st.tabs(["AWS", "Google Cloud", "Azure", "Cisco"])
-                def rnd_cld(prov, t):
-                    with t:
-                        outs = session.query(CloudOutage).filter(CloudOutage.provider.like(prov)).order_by(CloudOutage.is_resolved.asc(), CloudOutage.updated_at.desc()).all()
-                        if not outs: st.success("Operational.")
-                        for o in outs:
-                            ic = "✅ RESOLVED" if o.is_resolved else "🚨 ACTIVE"
-                            with st.expander(f"[{ic}] {o.service} ({format_local_time(o.updated_at)})"):
-                                st.markdown(f"[{o.title}]({o.link})\n\n{o.description}")
-                rnd_cld("AWS", sa); rnd_cld("Google Cloud", sg); rnd_cld("Azure", sz); rnd_cld("Cisco%", sc)
+                
+                active_outages = session.query(CloudOutage).filter(CloudOutage.is_resolved == False).order_by(CloudOutage.updated_at.desc()).all()
+                
+                if not active_outages:
+                    st.success("✅ All tracked global SaaS and IaaS providers are reporting Operational status.")
+                else:
+                    affected_providers = sorted(list(set([o.provider for o in active_outages])))
+                    st.warning(f"⚠️ Active service degradations detected across {len(affected_providers)} providers.")
+                    
+                    provider_tabs = st.tabs(affected_providers)
+                    
+                    for p_idx, provider_name in enumerate(affected_providers):
+                        with provider_tabs[p_idx]:
+                            prov_outs = [o for o in active_outages if o.provider == provider_name]
+                            for o in prov_outs:
+                                with st.expander(f"🚨 {o.service} ({format_local_time(o.updated_at)})"):
+                                    st.markdown(f"**[{o.title}]({o.link})**\n\n{o.description}")
+                                    
+                st.divider()
+                with st.expander("📚 View Historical / Resolved Incidents (Last 72 Hours)"):
+                    resolved_outages = session.query(CloudOutage).filter(CloudOutage.is_resolved == True).order_by(CloudOutage.updated_at.desc()).limit(50).all()
+                    if not resolved_outages:
+                        st.info("No recently resolved incidents.")
+                    for o in resolved_outages:
+                        st.markdown(f"✅ **{o.provider}** | {o.service} <br><small>[{o.title}]({o.link})</small>", unsafe_allow_html=True)
             tab_idx += 1
             
         if "tab_tt_infra" in st.session_state.allowed_actions:
             with tabs[tab_idx]:
-                if st.button("🔄 Sync Regional Telemetry", disabled=not can_sync, key="tt_sync_infra"):
-                    with st.spinner("Pulling..."):
+                col_sync1, col_sync2 = st.columns([3, 1])
+                if col_sync2.button("🔄 Sync Regional Telemetry", disabled=not can_sync, key="tt_sync_infra", width="stretch"):
+                    with st.spinner("Pulling Radar & Calculating Geospatial Intersections..."):
                         from src.infra_worker import fetch_regional_hazards; fetch_regional_hazards(); time.sleep(1); safe_rerun()
-                components.html("""<iframe src="https://www.rainviewer.com/map.html?loc=34.8,-92.2,6&oFa=0&oC=1&oU=0&oCS=1&oF=0&oAP=1&c=3&o=83&lm=1&layer=radar&sm=1&sn=1" width="100%" height="600" frameborder="0" style="border-radius: 8px;" allowfullscreen></iframe>""", height=600)
-                for haz in session.query(RegionalHazard).order_by(RegionalHazard.updated_at.desc()).all():
-                    ic = "🔴" if haz.severity in ["Extreme", "Severe"] else "🟠" if haz.severity == "Moderate" else "🔵"
-                    with st.expander(f"{ic} [{haz.severity}] {haz.title}"):
-                        st.markdown(f"**Area:** {haz.location}\n\n{haz.description}")
+                
+                locs = session.query(MonitoredLocation).all()
+                df = pd.DataFrame([{"id": l.id, "Name": l.name, "Type": l.loc_type, "Priority": l.priority, "Risk": l.current_spc_risk, "Lat": l.lat, "Lon": l.lon} for l in locs]) if locs else pd.DataFrame()
+                
+                tab_map, tab_dash, tab_matrix, tab_manage = st.tabs(["🗺️ Geospatial Overlay", "📊 Executive Dashboard", "🗄️ Location Matrix", "📍 Manage Locations"])
+                
+                with tab_map:
+                    map_df = df.copy()
+                    if not df.empty:
+                        cf1, cf2 = st.columns(2)
+                        available_types = df['Type'].unique().tolist()
+                        available_prios = sorted(df['Priority'].unique().tolist())
+                        selected_types = cf1.multiselect("Filter by Location Type", available_types, default=available_types, key="map_filt_type")
+                        selected_prios = cf2.multiselect("Filter by Priority", available_prios, default=available_prios, key="map_filt_prio")
+                        map_df = df[df['Type'].isin(selected_types) & df['Priority'].isin(selected_prios)]
+                        st.write("")
+                    
+                    c_map1, c_map2 = st.columns([2, 1])
+                    with c_map1:
+                        st.subheader("Live SPC & Infrastructure Overlay")
+                        import pydeck as pdk
+                        import requests
+                        layers = []
+                        try:
+                            spc_res = requests.get("https://www.spc.noaa.gov/products/outlook/day1otlk_cat.lyr.geojson", timeout=5)
+                            if spc_res.status_code == 200:
+                                spc_geo = spc_res.json()
+                                color_map = {
+                                    "TSTM": [192, 232, 192, 100], "MRGL": [124, 205, 124, 150],
+                                    "SLGT": [246, 246, 123, 150], "ENH": [230, 153, 0, 150],
+                                    "MDT": [255, 0, 0, 150], "HIGH": [255, 0, 255, 150]
+                                }
+                                for f in spc_geo.get('features', []):
+                                    label = f.get('properties', {}).get('LABEL', '')
+                                    f['properties']['fill_color'] = color_map.get(label, [0, 0, 0, 0])
+                                layers.append(pdk.Layer(
+                                    "GeoJsonLayer", spc_geo, pickable=True, stroked=True,
+                                    filled=True, get_fill_color="properties.fill_color",
+                                    get_line_color=[0, 0, 0, 255], line_width_min_pixels=1
+                                ))
+                        except Exception: pass
+                        
+                        if not map_df.empty:
+                            layers.append(pdk.Layer(
+                                "ScatterplotLayer", map_df, pickable=True, opacity=0.9, stroked=True,
+                                filled=True, radius_scale=6, radius_min_pixels=4, radius_max_pixels=12,
+                                line_width_min_pixels=1, get_position="[Lon, Lat]",
+                                get_fill_color=[255, 255, 255], get_line_color=[0, 0, 0],
+                            ))
+                            
+                        view_state = pdk.ViewState(latitude=34.8, longitude=-92.2, zoom=6, pitch=0)
+                        st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view_state, tooltip={"text": "{Name}\nType: {Type}\nRisk: {Risk}"} if not map_df.empty else {"text": "{LABEL}"}), width="stretch")
+                    
+                    with c_map2:
+                        st.subheader("Precipitation Radar")
+                        components.html("""<iframe src="https://www.rainviewer.com/map.html?loc=34.8,-92.2,6&oFa=0&oC=1&oU=0&oCS=1&oF=0&oAP=1&c=3&o=83&lm=1&layer=radar&sm=1&sn=1" width="100%" height="450" frameborder="0" style="border-radius: 8px;" allowfullscreen></iframe>""", height=450)
+                        
+                    st.divider()
+                    st.subheader("Active NWS Warnings (Arkansas)")
+                    nws_alerts = session.query(RegionalHazard).order_by(RegionalHazard.updated_at.desc()).all()
+                    if not nws_alerts: st.success("No active NWS alerts for the region.")
+                    for haz in nws_alerts:
+                        ic = "🔴" if haz.severity in ["Extreme", "Severe"] else "🟠" if haz.severity == "Moderate" else "🔵"
+                        with st.expander(f"{ic} [{haz.severity}] {haz.title}"):
+                            st.markdown(f"**Area:** {haz.location}\n\n{haz.description}")
+
+                with tab_dash:
+                    st.subheader("📊 Infrastructure Threat Dashboard")
+                    with st.expander("ℹ️ Understanding SPC Convective Risk Categories"):
+                        st.markdown("""
+                        The **Storm Prediction Center (SPC)** issues national forecasts for severe thunderstorms, tornadoes, and extreme winds:
+                        * 🌩️ **TSTM:** General, non-severe thunderstorms.
+                        * 🟩 **MRGL (1/5):** Isolated severe thunderstorms possible.
+                        * 🟨 **SLGT (2/5):** Scattered severe thunderstorms possible.
+                        * 🟧 **ENH (3/5):** Numerous severe thunderstorms possible.
+                        * 🟥 **MDT (4/5):** Widespread severe thunderstorms likely.
+                        * 🟪 **HIGH (5/5):** Widespread, long-lived, particularly dangerous outbreak expected.
+                        """)
+
+                    if df.empty:
+                        st.info("No monitored locations found.")
+                    else:
+                        risk_order = ["HIGH", "MDT", "ENH", "SLGT", "MRGL", "TSTM", "None"]
+                        df['Risk'] = pd.Categorical(df['Risk'], categories=risk_order, ordered=True)
+                        risk_df = df[df['Risk'] != 'None']
+                        
+                        st.download_button(
+                            label="📥 Export Infrastructure Risk Report (CSV)",
+                            data=df.sort_values(by=['Risk', 'Priority']).to_csv(index=False).encode('utf-8'),
+                            file_name=f"Infrastructure_Risk_{datetime.now(LOCAL_TZ).strftime('%Y%m%d_%H%M')}.csv",
+                            mime='text/csv', width="stretch"
+                        )
+                        st.divider()
+                        
+                        c_m1, c_m2, c_m3 = st.columns(3)
+                        c_m1.metric("Total Tracked Sites", len(df))
+                        c_m2.metric("Sites in Active Risk Areas", len(risk_df))
+                        highest_risk = risk_df['Risk'].sort_values().iloc[0] if not risk_df.empty else "None"
+                        c_m3.metric("Highest Current Risk", highest_risk)
+                        st.write("")
+                        
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.markdown("**Sites by Risk Level**")
+                            if not risk_df.empty:
+                                risk_counts = risk_df['Risk'].value_counts().reset_index()
+                                risk_counts.columns = ['Risk Level', 'Count']
+                                st.bar_chart(risk_counts.set_index('Risk Level'), color="#ff4b4b", width="stretch")
+                            else: st.success("All monitored sites are clear.")
+                        with c2:
+                            st.markdown("**Sites by Facility Type**")
+                            type_counts = df['Type'].value_counts().reset_index()
+                            type_counts.columns = ['Location Type', 'Count']
+                            st.bar_chart(type_counts.set_index('Location Type'), color="#1f77b4", width="stretch")
+
+                        st.divider()
+                        c3, c4 = st.columns(2)
+                        with c3:
+                            st.markdown("**Risk by Priority Level**")
+                            st.dataframe(pd.crosstab(df['Priority'], df['Risk']), width="stretch")
+                        with c4:
+                            st.markdown("**Risk by Facility Type**")
+                            st.dataframe(pd.crosstab(df['Type'], df['Risk']), width="stretch")
+
+                with tab_matrix:
+                    st.subheader("Active Infrastructure Matrix")
+                    st.caption("All tracked locations overlaid with current SPC Convective Outlooks.")
+                    if not df.empty:
+                        display_df = df.drop(columns=['id', 'Lat', 'Lon'])
+                        st.dataframe(display_df.sort_values(by=['Risk', 'Priority'], ascending=[True, True]), width="stretch", hide_index=True)
+
+                with tab_manage:
+                    c_up, c_ed = st.columns([1, 2])
+                    with c_up:
+                        st.subheader("Mass Import (JSON)")
+                        st.caption("Requires 'name', 'lat', 'lon'. Optional: 'type', 'priority'.")
+                        uploaded_file = st.file_uploader("Upload Sites", type=["json"], key="loc_uploader")
+                        if uploaded_file is not None:
+                            if st.button("📥 Import Data", width="stretch"):
+                                import json
+                                try:
+                                    data = json.load(uploaded_file)
+                                    added = 0
+                                    existing_names = {l[0] for l in session.query(MonitoredLocation.name).all()}
+                                    for item in data:
+                                        name = item.get("name")
+                                        lat, lon = item.get("lat"), item.get("lon")
+                                        if name and lat is not None and lon is not None and name not in existing_names:
+                                            session.add(MonitoredLocation(
+                                                name=name, lat=float(lat), lon=float(lon),
+                                                loc_type=item.get("type", "General"), priority=int(item.get("priority", 3))
+                                            ))
+                                            existing_names.add(name)
+                                            added += 1
+                                    session.commit()
+                                    st.success(f"Imported {added} new locations!"); time.sleep(1.5); safe_rerun()
+                                except Exception as e:
+                                    st.error(f"Import failed: {e}"); session.rollback()
+                                    
+                    with c_ed:
+                        st.subheader("Manual Adjustments")
+                        if not df.empty:
+                            edited_df = st.data_editor(df, hide_index=True, disabled=["id", "Risk"], width="stretch", key="loc_editor")
+                            if st.button("💾 Save Manual Adjustments", width="stretch"):
+                                for index, row in edited_df.iterrows():
+                                    db_loc = session.query(MonitoredLocation).filter_by(id=row['id']).first()
+                                    if db_loc:
+                                        db_loc.name = row['Name']
+                                        db_loc.loc_type = row['Type']
+                                        db_loc.priority = row['Priority']
+                                        db_loc.lat = row['Lat']
+                                        db_loc.lon = row['Lon']
+                                session.commit()
+                                st.success("Changes saved!"); time.sleep(1); safe_rerun()
+                        
+                        st.divider()
+                        st.write("**Danger Zone**")
+                        if st.button("🗑️ Delete All Locations", width="stretch"):
+                            session.execute(text("TRUNCATE TABLE monitored_locations RESTART IDENTITY CASCADE;"))
+                            session.commit()
+                            st.success("All locations deleted!"); time.sleep(1); safe_rerun()
             tab_idx += 1
 
-# ================= NEW MODULE: THREAT HUNTING & IOCS =================
 elif page == "🎯 Threat Hunting & IOCs":
     st.title("🎯 Active Threat Hunting")
     st.markdown("Automated IOC extraction and LLM-assisted deep scanning for specific threat actors, malwares, or target infrastructure.")
@@ -505,40 +716,23 @@ elif page == "🎯 Threat Hunting & IOCs":
                 })
             
             df = pd.DataFrame(ioc_data)
-            
             col_filter1, col_filter2 = st.columns(2)
             filter_type = col_filter1.multiselect("Filter by Type", ["IPv4", "SHA256", "MD5", "CVE"], default=["IPv4", "SHA256", "MD5", "CVE"])
-            
             filtered_df = df[df["Type"].isin(filter_type)]
             
-            st.dataframe(
-                filtered_df, 
-                use_container_width=True, 
-                column_config={"Source Article": st.column_config.LinkColumn("Source")},
-                hide_index=True
-            )
-            
-            st.download_button(
-                label="📥 Export IOCs (CSV)",
-                data=filtered_df.to_csv(index=False).encode('utf-8'),
-                file_name=f"IOC_Export_{datetime.now(LOCAL_TZ).strftime('%Y%m%d')}.csv",
-                mime='text/csv',
-                use_container_width=True
-            )
+            st.dataframe(filtered_df, width="stretch", column_config={"Source Article": st.column_config.LinkColumn("Source")}, hide_index=True)
+            st.download_button(label="📥 Export IOCs (CSV)", data=filtered_df.to_csv(index=False).encode('utf-8'), file_name=f"IOC_Export_{datetime.now(LOCAL_TZ).strftime('%Y%m%d')}.csv", mime='text/csv', width="stretch")
 
     with tab_manual:
         st.subheader("Targeted LLM Deep Hunt")
         st.markdown("Search the historical database for a specific threat and use the AI to generate YARA patterns, SIEM queries, and TTP assessments.")
-        
         with st.form("manual_hunt_form"):
             hunt_target = st.text_input("Target Entity (e.g., 'Volt Typhoon', 'Ivanti Connect Secure', 'RansomHub')")
             hunt_depth = st.slider("Historical Depth (Days)", min_value=7, max_value=90, value=30)
             
-            if st.form_submit_button("🚀 Execute Deep Hunt", type="primary", disabled=not can_trigger_ai):
-                if not hunt_target:
-                    st.error("Please enter a target entity.")
-                elif not ai_enabled:
-                    st.error("AI Engine is currently disabled in settings.")
+            if st.form_submit_button("🚀 Execute Deep Hunt", type="primary", disabled=not can_trigger_ai, width="stretch"):
+                if not hunt_target: st.error("Please enter a target entity.")
+                elif not ai_enabled: st.error("AI Engine is currently disabled in settings.")
                 else:
                     with st.spinner(f"Scanning the last {hunt_depth} days of telemetry for '{hunt_target}'..."):
                         cutoff_date = datetime.utcnow() - timedelta(days=hunt_depth)
@@ -547,30 +741,19 @@ elif page == "🎯 Threat Hunting & IOCs":
                             (Article.title.ilike(f"%{hunt_target}%") | Article.summary.ilike(f"%{hunt_target}%"))
                         ).limit(30).all()
                         
-                        if not target_arts:
-                            st.warning(f"No intelligence found matching '{hunt_target}' in the requested timeframe.")
+                        if not target_arts: st.warning(f"No intelligence found matching '{hunt_target}' in the requested timeframe.")
                         else:
                             st.success(f"Found {len(target_arts)} distinct reports. Handing off to AI for synthesis...")
-                            
                             hunt_context = "\n\n".join([f"Source: {a.source}\nTitle: {a.title}\nContent: {a.summary}" for a in target_arts])
-                            
                             sys_prompt = f"""You are an elite Cyber Threat Hunter. Analyze the provided intelligence reports regarding '{hunt_target}'.
                             Synthesize the data and generate an actionable Threat Hunt Package.
-                            
                             Your output MUST strictly follow this Markdown structure:
                             ### 1. Threat Overview & TTPs
-                            (Briefly summarize how this threat operates)
-                            
                             ### 2. Known Targets & Vulnerabilities
-                            (List specific systems or CVEs targeted)
-                            
                             ### 3. Hunt Queries & Detection Logic
-                            (Provide conceptual SIEM queries, Splunk logic, or YARA rules based on the intelligence)
-                            
                             Do not hallucinate. Base your response ONLY on the provided text."""
                             
                             messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": hunt_context}]
-                            
                             from src.llm import call_llm
                             ai_hunt_result = call_llm(messages, sys_config, temperature=0.1)
                             
@@ -581,6 +764,197 @@ elif page == "🎯 Threat Hunting & IOCs":
                                 st.divider()
                                 st.markdown("### 🔗 Reference Intel")
                                 for a in target_arts: st.markdown(f"- [{a.title}]({a.link})")
+
+# ================= NEW MODULE: AIOps RCA LIVE =================
+elif page == "⚡ AIOps RCA":
+    st.title("⚡ AIOps Root Cause Analysis")
+    st.markdown("Live correlation of non-uniform monitoring alerts with Regional Intelligence.")
+    status_indicator = f"🔴 **LIVE** (Refreshing every {current_refresh_sec}s)" if current_refresh_sec > 0 else "⏸️ **PAUSED**"
+    st.caption(f"{status_indicator} | Webhook Listener Active on Port 8000")
+    st.write("")
+    
+    from src.database import TimelineEvent, RegionalOutage
+    from shapely.geometry import Point
+    
+    tab_active, tab_learning = st.tabs(["🔴 Active Incident Board", "🧠 ML Alias Learning"])
+    
+    with tab_active:
+        active_alerts = session.query(SolarWindsAlert).filter(SolarWindsAlert.status != 'Resolved').order_by(SolarWindsAlert.received_at.desc()).all()
+        c_live, c_sw = st.columns([3, 1])
+        
+        with c_sw:
+            st.subheader("⏱️ Live Event Log")
+            st.caption("Descending Chronological")
+            
+            c_btn1, c_btn2 = st.columns(2)
+            if c_btn1.button("🧹 Clear Log", width="stretch"):
+                session.query(TimelineEvent).delete(); session.commit(); safe_rerun()
+            if c_btn2.button("🗑️ Nuke Alerts", width="stretch"):
+                session.query(SolarWindsAlert).delete(); session.commit(); safe_rerun()
+            
+            st.divider()
+            
+            with st.container(height=800):
+                events = session.query(TimelineEvent).order_by(TimelineEvent.timestamp.desc()).limit(50).all()
+                if not events:
+                    st.info("Listening for network telemetry...")
+                else:
+                    for e in events:
+                        icon = "🔴" if e.event_type == "Alert" else "🟢" if e.event_type == "Resolution" else "🤖" if e.source == "AI" else "🔵"
+                        st.markdown(f"<small>**{e.timestamp.strftime('%H:%M:%S')}** | {icon} {e.source}</small><br>{e.message}", unsafe_allow_html=True)
+                        st.divider()
+
+        with c_live:
+            # --- MAP RENDERED FIRST ---
+            st.subheader("🗺️ Dynamic Geospatial Overlays")
+            import pydeck as pdk
+            
+            locs = session.query(MonitoredLocation).all()
+            grid_issues = session.query(RegionalOutage).filter_by(is_resolved=False).all()
+            
+            if not locs:
+                st.info("No monitored locations configured. Map cannot be rendered.")
+            else:
+                # --- NEW: MAP TYPE FILTER ---
+                available_types = sorted(list(set([l.loc_type for l in locs if l.loc_type])))
+                selected_types = st.multiselect("Filter Sites by Type", available_types, default=available_types, key="rca_map_type_filt")
+                
+                filtered_locs = [l for l in locs if l.loc_type in selected_types]
+                
+                alert_mapped_sites = [a.mapped_location for a in active_alerts if a.mapped_location != "Unknown"]
+                site_down_counts = {site: alert_mapped_sites.count(site) for site in set(alert_mapped_sites)}
+                down_locs = [l for l in filtered_locs if l.name in alert_mapped_sites]
+                
+                map_data, node_radii = [], []
+                
+                for l in filtered_locs:
+                    down_count = site_down_counts.get(l.name, 0)
+                    is_down = down_count > 0
+                    color = [255, 0, 0] if is_down else [0, 255, 0]
+                    status_text = f"{down_count} NODE(S) OFFLINE" if is_down else "Online"
+                    
+                    map_data.append({"Name": l.name, "Lat": l.lat, "Lon": l.lon, "Status": status_text, "Color": color})
+                    
+                    if is_down:
+                        base_radius = 5000 + ((down_count - 1) * 3000)
+                        nearby_bonus = 0
+                        for other_l in down_locs:
+                            if other_l.name != l.name:
+                                dist_deg = ((l.lon - other_l.lon)**2 + (l.lat - other_l.lat)**2)**0.5
+                                dist_km = dist_deg * 111
+                                if dist_km < 50:
+                                    nearby_bonus += 8000
+                                    
+                        total_radius = base_radius + nearby_bonus
+                        node_radii.append({"lat": l.lat, "lon": l.lon, "radius": total_radius})
+                        
+                layers = []
+                
+                isp_data = [{"lat": i.lat, "lon": i.lon, "radius": i.radius_km * 1000} for i in grid_issues if i.outage_type in ["ISP", "Cellular"]]
+                if isp_data:
+                    layers.append(pdk.Layer("ScatterplotLayer", pd.DataFrame(isp_data), get_position="[lon, lat]", get_fill_color=[128, 0, 128, 60], get_radius="radius", pickable=False))
+                    
+                pwr_data = [{"lat": i.lat, "lon": i.lon, "radius": i.radius_km * 1000} for i in grid_issues if i.outage_type == "Power"]
+                if pwr_data:
+                    layers.append(pdk.Layer("ScatterplotLayer", pd.DataFrame(pwr_data), get_position="[lon, lat]", get_fill_color=[255, 200, 0, 60], get_radius="radius", pickable=False))
+                
+                if node_radii:
+                    layers.append(pdk.Layer("ScatterplotLayer", pd.DataFrame(node_radii), get_position="[lon, lat]", get_fill_color=[255, 0, 0, 40], get_radius="radius", pickable=False))
+                    
+                layers.append(pdk.Layer("ScatterplotLayer", pd.DataFrame(map_data), get_position="[Lon, Lat]", get_fill_color="Color", get_radius=1500, pickable=True))
+                
+                center_lat, center_lon = (node_radii[0]['lat'], node_radii[0]['lon']) if node_radii else (34.8, -92.2)
+                st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=pdk.ViewState(latitude=center_lat, longitude=center_lon, zoom=6.5, pitch=0), tooltip={"text": "{Name}\nStatus: {Status}"}), width="stretch", height=600)
+            
+            st.divider()
+
+            # --- ALERTS RENDERED SECOND ---
+            st.subheader("🧠 Event Correlation Matrix")
+            
+            if not active_alerts:
+                st.success("✅ All monitored infrastructure is operational.")
+            else:
+                for alert in active_alerts:
+                    with st.expander(f"🚨 {alert.severity.upper()}: {alert.node_name} ➔ Mapped to [{alert.mapped_location}]", expanded=True):
+                        c_d1, c_d2 = st.columns(2)
+                        c_d1.error(f"**Event:** {alert.event_type} | **Status:** {alert.status} | **IP:** {alert.ip_address}")
+                        
+                        with c_d2:
+                            with st.popover("🔍 View Dynamic Raw Payload"):
+                                if alert.raw_payload:
+                                    flat_raw = {}
+                                    for k, v in alert.raw_payload.items():
+                                        if isinstance(v, dict):
+                                            for sub_k, sub_v in v.items(): flat_raw[f"{k}.{sub_k}"] = sub_v
+                                        else: flat_raw[k] = v
+                                    st.dataframe(pd.DataFrame(list(flat_raw.items()), columns=["Telemetry Key", "Value"]), hide_index=True, width="stretch")
+                                else: st.write("No payload data attached.")
+                        
+                        node = session.query(MonitoredLocation).filter(MonitoredLocation.name == alert.mapped_location).first()
+                        node_risk = node.current_spc_risk if node else "Unknown"
+                        active_cloud = session.query(CloudOutage).filter_by(is_resolved=False).count()
+                        
+                        nearby_power = 0
+                        nearby_isp = 0
+                        if node and node.lat and node.lon:
+                            active_grid_issues = session.query(RegionalOutage).filter_by(is_resolved=False).all()
+                            for issue in active_grid_issues:
+                                if issue.lat and issue.lon:
+                                    dist_deg = ((node.lon - issue.lon)**2 + (node.lat - issue.lat)**2)**0.5
+                                    dist_km = dist_deg * 111
+                                    if dist_km <= issue.radius_km:
+                                        if issue.outage_type == "Power": nearby_power += 1
+                                        elif issue.outage_type in ["ISP", "Cellular"]: nearby_isp += 1
+
+                        c_rca1, c_rca2, c_rca3 = st.columns(3)
+                        c_rca1.metric("Local SPC Risk", node_risk)
+                        c_rca2.metric("Nearby Power Outages", nearby_power)
+                        c_rca3.metric("Nearby Telecom Outages", nearby_isp)
+                        
+                        if alert.ai_root_cause:
+                            st.info(alert.ai_root_cause)
+                        else:
+                            if st.button("🤖 Generate AI RCA", key=f"gen_rca_{alert.id}", width="stretch", disabled=not can_trigger_ai):
+                                with st.spinner("Synthesizing RCA..."):
+                                    prompt = f"Analyze infrastructure failure. Node: {alert.node_name}, Site: {alert.mapped_location}, Event: {alert.event_type}. Local Risk: {node_risk}. Grid Outages: {nearby_power}. ISP Outages: {nearby_isp}."
+                                    from src.llm import call_llm
+                                    rca_result = call_llm([{"role": "user", "content": prompt}], sys_config, temperature=0.1)
+                                    if rca_result:
+                                        alert.ai_root_cause = rca_result
+                                        session.add(TimelineEvent(source="AI", event_type="System", message=f"🤖 AI generated Root Cause Analysis for {alert.node_name}"))
+                                        session.commit(); safe_rerun()
+                                        
+                        if st.button("✅ Force Manual Resolve", key=f"res_{alert.id}", width="stretch"):
+                            alert.status = 'Resolved'
+                            session.add(TimelineEvent(source="User", event_type="Resolution", message=f"🟢 Operator manually resolved {alert.node_name}"))
+                            session.commit(); safe_rerun()
+
+    with tab_learning:
+        st.subheader("🧠 ML Node Mapping Matrix")
+        st.markdown("The system uses Fuzzy Logic to guess which Site a cryptic Node Name belongs to. Review and verify the AI's guesses here.")
+        
+        from src.database import NodeAlias
+        aliases = session.query(NodeAlias).order_by(NodeAlias.confidence_score.asc()).all()
+        
+        if not aliases: st.info("No learned aliases yet. Send a webhook payload to begin training.")
+        else:
+            all_locs = ["Unknown"] + [l.name for l in session.query(MonitoredLocation).all()]
+            for a in aliases:
+                with st.container(border=True):
+                    c_a1, c_a2, c_a3, c_a4 = st.columns([2, 3, 1, 1])
+                    c_a1.code(a.node_pattern)
+                    
+                    new_mapping = c_a2.selectbox("Mapped Site", all_locs, index=all_locs.index(a.mapped_location_name) if a.mapped_location_name in all_locs else 0, key=f"sel_al_{a.id}")
+                    
+                    if a.is_verified: c_a3.success("Verified")
+                    else: c_a3.warning(f"AI Guess ({int(a.confidence_score)}%)")
+                    
+                    if c_a4.button("💾 Save", key=f"sv_al_{a.id}", width="stretch"):
+                        a.mapped_location_name = new_mapping
+                        a.is_verified = True
+                        a.confidence_score = 100.0 
+                        session.commit()
+                        st.success("Rule Saved!"); time.sleep(0.5); safe_rerun()
 
 # ================= 4. REPORT CENTER =================
 elif page == "📑 Report Center":
@@ -622,7 +996,7 @@ elif page == "📑 Report Center":
                     msys = st.text_area("Manual Systems (Optional)", height=80, key="rc_msys")
                     obj = st.text_area("AI Objective", value="Generate an exhaustive, detailed technical intelligence report.", height=80, key="rc_obj")
                     
-                    if st.button("🚀 Generate Report", type="primary", disabled=not can_trigger_ai, key="rc_gen_btn"):
+                    if st.button("🚀 Generate Report", type="primary", disabled=not can_trigger_ai, key="rc_gen_btn", width="stretch"):
                         if not sels: st.error("Select at least one article.")
                         else:
                             arts = [amap[t] for t in sels]
@@ -644,11 +1018,11 @@ elif page == "📑 Report Center":
                     st.divider()
                     sv_t = st.text_input("Report Title", value=f"Report - {datetime.now(LOCAL_TZ).strftime('%Y-%m-%d %H:%M')}", key="rc_sv_t")
                     c_s1, c_s2, c_s3 = st.columns([1, 1, 1])
-                    if c_s1.button("💾 Save to Library", use_container_width=True, key="rc_sv_btn"):
+                    if c_s1.button("💾 Save to Library", width="stretch", key="rc_sv_btn"):
                         session.add(SavedReport(title=sv_t, author=st.session_state.current_user, content=st.session_state.generated_report))
                         session.commit(); st.success("Saved!")
-                    c_s2.download_button("⬇️ Download (.md)", data=st.session_state.generated_report, file_name=f"{sv_t}.md", use_container_width=True, key="rc_dl_btn")
-                    if c_s3.button("🗑️ Clear", type="secondary", use_container_width=True, key="rc_clr_btn"):
+                    c_s2.download_button("⬇️ Download (.md)", data=st.session_state.generated_report, file_name=f"{sv_t}.md", width="stretch", key="rc_dl_btn")
+                    if c_s3.button("🗑️ Clear", type="secondary", width="stretch", key="rc_clr_btn"):
                         st.session_state.generated_report = None; safe_rerun()
             tab_idx += 1
             
@@ -661,9 +1035,9 @@ elif page == "📑 Report Center":
                         with st.expander(f"📄 **{r.title}** | {r.author.capitalize()} | {format_local_time(r.created_at)}"):
                             st.markdown(r.content)
                             c_d1, c_d2, c_sp = st.columns([1, 1, 4])
-                            c_d1.download_button("⬇️ Download", data=r.content, file_name=f"{r.title}.md", use_container_width=True, key=f"dl_lib_{r.id}")
+                            c_d1.download_button("⬇️ Download", data=r.content, file_name=f"{r.title}.md", width="stretch", key=f"dl_lib_{r.id}")
                             if st.session_state.current_user == r.author or st.session_state.current_role == "admin":
-                                if c_d2.button("🗑️ Delete", use_container_width=True, key=f"del_lib_{r.id}"):
+                                if c_d2.button("🗑️ Delete", width="stretch", key=f"del_lib_{r.id}"):
                                     session.delete(r); session.commit(); safe_rerun()
             tab_idx += 1
 
@@ -678,7 +1052,7 @@ elif page == "⚙️ Settings & Admin":
             st.subheader("Manage Keywords")
             with st.form("bulk_kw"):
                 raw_text = st.text_area("Bulk Add Keywords (word, weight)", placeholder="infrastructure, 80", key="set_kw_bulk")
-                if st.form_submit_button("Add Keywords"):
+                if st.form_submit_button("Add Keywords", width="stretch"):
                     for line in raw_text.split('\n'):
                         if line.strip():
                             parts = line.split(',')
@@ -690,13 +1064,13 @@ elif page == "⚙️ Settings & Admin":
                 for k in session.query(Keyword).order_by(Keyword.weight.desc()).all():
                     c_a, c_b, c_c = st.columns([3, 1, 1])
                     c_a.code(k.word); c_b.write(f"**{k.weight}**")
-                    if c_c.button("🗑️", key=f"del_kw_{k.id}"): session.delete(k); session.commit(); safe_rerun()
+                    if c_c.button("🗑️", key=f"del_kw_{k.id}", width="stretch"): session.delete(k); session.commit(); safe_rerun()
 
         with col2:
             st.subheader("Manage RSS Feeds")
             with st.form("bulk_feed"):
                 raw_text_feeds = st.text_area("Bulk Add Feeds (URL, Name)", placeholder="https://site.com/feed, Tech News", key="set_feed_bulk")
-                if st.form_submit_button("Add Sources"):
+                if st.form_submit_button("Add Sources", width="stretch"):
                     for line in raw_text_feeds.split('\n'):
                         if line.strip():
                             parts = line.split(',')
@@ -707,7 +1081,7 @@ elif page == "⚙️ Settings & Admin":
             with st.expander("Active Feeds"):
                 for s in session.query(FeedSource).all():
                     st.text(s.name); st.caption(s.url)
-                    if st.button("Delete", key=f"del_src_{s.id}"): session.delete(s); session.commit(); safe_rerun()
+                    if st.button("Delete", key=f"del_src_{s.id}", width="stretch"): session.delete(s); session.commit(); safe_rerun()
                         
     with tab_ml:
         st.subheader("Smart Filter Training")
@@ -716,7 +1090,7 @@ elif page == "⚙️ Settings & Admin":
         total = count_pos + count_neg
         c1, c2, c3 = st.columns(3)
         c1.metric("Total Samples", total); c2.metric("Positives (Keep)", count_pos); c3.metric("Negatives (Dismiss)", count_neg)
-        if st.button("🚀 Retrain Model Now", type="primary", disabled=not can_train, key="set_ml_retrain"):
+        if st.button("🚀 Retrain Model Now", type="primary", disabled=not can_train, key="set_ml_retrain", width="stretch"):
             if total < 10: st.error("Not enough data! Please review at least 10 articles.")
             else:
                 with st.spinner("Training neural pathways..."):
@@ -735,7 +1109,7 @@ elif page == "⚙️ Settings & Admin":
             current_stack = config.tech_stack if config.tech_stack else "SolarWinds, Cisco SD-WAN"
             tech_stack_input = st.text_area("Internal Tech Stack", value=current_stack, height=100, key="set_llm_stack")
             is_active = st.checkbox("Enable AI Features", value=config.is_active, key="set_llm_active")
-            if st.form_submit_button("Save AI Config"):
+            if st.form_submit_button("Save AI Config", width="stretch"):
                 config.llm_endpoint = endpoint; config.llm_api_key = api_key; config.llm_model_name = model_name
                 config.tech_stack = tech_stack_input; config.is_active = is_active
                 session.commit(); st.success("✅ AI Configuration Saved!"); time.sleep(1); safe_rerun()
@@ -751,7 +1125,7 @@ elif page == "⚙️ Settings & Admin":
                     new_username = st.text_input("Username").strip()
                     new_password = st.text_input("Password", type="password")
                     new_role = st.selectbox("Assign Role", available_roles)
-                    if st.form_submit_button("Create User"):
+                    if st.form_submit_button("Create User", width="stretch"):
                         if not new_username or not new_password: st.error("Username and password required.")
                         elif session.query(User).filter(User.username == new_username).first(): st.error("Username already exists.")
                         else:
@@ -764,7 +1138,7 @@ elif page == "⚙️ Settings & Admin":
                 with st.form("update_user_role_form"):
                     target_user = st.selectbox("Select User", [u.username for u in session.query(User).all()])
                     new_assigned_role = st.selectbox("Assign New Role", available_roles)
-                    if st.form_submit_button("Update Role"):
+                    if st.form_submit_button("Update Role", width="stretch"):
                         u_obj = session.query(User).filter(User.username == target_user).first()
                         if u_obj:
                             u_obj.role = new_assigned_role; u_obj.session_token = None
@@ -776,12 +1150,42 @@ elif page == "⚙️ Settings & Admin":
                     new_role_name = st.text_input("Role Name").strip().lower()
                     new_role_pages = st.multiselect("Allowed Master Pages", ALL_POSSIBLE_PAGES)
                     new_role_actions = st.multiselect("Allowed Sub-Tabs & Actions", ALL_POSSIBLE_ACTIONS)
-                    if st.form_submit_button("Create Role"):
+                    if st.form_submit_button("Create Role", width="stretch"):
                         if not new_role_name or not new_role_pages: st.error("Role name and at least one page required.")
                         elif session.query(Role).filter(Role.name == new_role_name).first(): st.error("Role name already exists.")
                         else:
                             session.add(Role(name=new_role_name, allowed_pages=new_role_pages, allowed_actions=new_role_actions))
                             session.commit(); st.success(f"Role '{new_role_name}' created!"); safe_rerun()
+                            
+            with st.container(border=True):
+                st.markdown("### ✏️ Edit Existing Role")
+                editable_roles = [r.name for r in session.query(Role).all() if r.name != "admin"]
+                if editable_roles:
+                    role_to_edit = st.selectbox("Select Role to Edit", editable_roles, key="edit_role_sel")
+                    if role_to_edit:
+                        selected_role_obj = session.query(Role).filter(Role.name == role_to_edit).first()
+                        current_pages = selected_role_obj.allowed_pages if selected_role_obj.allowed_pages else []
+                        current_actions = selected_role_obj.allowed_actions if selected_role_obj.allowed_actions else []
+                        
+                        default_pages = [p for p in current_pages if p in ALL_POSSIBLE_PAGES]
+                        default_actions = [a for a in current_actions if a in ALL_POSSIBLE_ACTIONS]
+                        
+                        with st.form("edit_role_form"):
+                            updated_pages = st.multiselect("Allowed Master Pages", ALL_POSSIBLE_PAGES, default=default_pages)
+                            updated_actions = st.multiselect("Allowed Sub-Tabs & Actions", ALL_POSSIBLE_ACTIONS, default=default_actions)
+                            
+                            if st.form_submit_button("Update Role", width="stretch"):
+                                if not updated_pages: 
+                                    st.error("A role must have at least one allowed page.")
+                                else:
+                                    selected_role_obj.allowed_pages = updated_pages
+                                    selected_role_obj.allowed_actions = updated_actions
+                                    session.commit()
+                                    st.success(f"Role '{role_to_edit}' updated!")
+                                    time.sleep(1)
+                                    safe_rerun()
+                else:
+                    st.info("No editable roles available.")
 
         with col_u2:
             with st.container(border=True):
@@ -790,7 +1194,7 @@ elif page == "⚙️ Settings & Admin":
                     c_name, c_role, c_act = st.columns([3, 2, 1])
                     c_name.write(f"**{u.username}**"); c_role.caption(u.role.upper())
                     if u.username != st.session_state.current_user:
-                        if c_act.button("🗑️", key=f"del_u_{u.id}"):
+                        if c_act.button("🗑️", key=f"del_u_{u.id}", width="stretch"):
                             session.delete(u); session.commit(); safe_rerun()
                             
             with st.container(border=True):
@@ -798,7 +1202,7 @@ elif page == "⚙️ Settings & Admin":
                 with st.form("admin_reset_pwd_form"):
                     target_user = st.selectbox("Select User", [u.username for u in session.query(User).all()])
                     force_new_pwd = st.text_input("New Password", type="password")
-                    if st.form_submit_button("Reset Password"):
+                    if st.form_submit_button("Reset Password", width="stretch"):
                         if force_new_pwd:
                             t_user = session.query(User).filter(User.username == target_user).first()
                             t_user.password_hash = bcrypt.hashpw(force_new_pwd.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -813,7 +1217,7 @@ elif page == "⚙️ Settings & Admin":
                     action_count = len(r.allowed_actions) if r.allowed_actions else 0
                     c_pages.caption(f"{len(r.allowed_pages)} pages | {action_count} perms")
                     if r.name not in ["admin", "analyst"]:
-                        if c_act.button("🗑️", key=f"del_role_{r.id}"):
+                        if c_act.button("🗑️", key=f"del_role_{r.id}", width="stretch"):
                             if session.query(User).filter(User.role == r.name).count() > 0: st.error("Users are assigned this role.")
                             else: session.delete(r); session.commit(); safe_rerun()
 
@@ -823,45 +1227,40 @@ elif page == "⚙️ Settings & Admin":
         with col1:
             st.write("**Routine Maintenance**")
             st.caption("Safely sweeps stale alerts & intel.")
-            if st.button("🧹 Run Garbage Collector", use_container_width=True, key="set_danger_gc"):
+            if st.button("🧹 Run Garbage Collector", width="stretch", key="set_danger_gc"):
                 with st.spinner("Purging stale data and vacuuming database..."):
                     from src.scheduler import run_database_maintenance
                     run_database_maintenance()
                     st.success("✅ Swept and optimized!"); time.sleep(1); safe_rerun()
             
-            # --- NEW DATA MIGRATION BUTTON ---
             st.write("**Data Migration**")
             st.caption("Applies new categories to historical 'General' data.")
-            if st.button("🔄 Recategorize Old Articles", use_container_width=True, key="set_danger_recat"):
+            if st.button("🔄 Recategorize Old Articles", width="stretch", key="set_danger_recat"):
                 with st.spinner("Scanning historical database..."):
                     from src.categorizer import categorize_text
-                    # Fetch all articles currently sitting in the default category
                     arts = session.query(Article).filter(Article.category == "General").all()
                     updated_count = 0
-                    
                     for a in arts:
                         full_text = f"{a.title} {a.summary}"
                         new_cat = categorize_text(full_text)
                         if new_cat != "General":
                             a.category = new_cat
                             updated_count += 1
-                            
                     session.commit()
                     st.success(f"✅ Successfully recategorized {updated_count} historical articles!")
-                    time.sleep(2)
-                    safe_rerun()
+                    time.sleep(2); safe_rerun()
                     
         with col2:
             st.write("**Clear History**")
             st.caption("Deletes all articles & IOCs.")
-            if st.button("🗑️ Delete All Articles", use_container_width=True, key="set_danger_clear"):
+            if st.button("🗑️ Delete All Articles", width="stretch", key="set_danger_clear"):
                 session.execute(text("TRUNCATE TABLE articles, extracted_iocs RESTART IDENTITY CASCADE;"))
                 session.commit(); safe_rerun()
         with col3:
             st.write("**Factory Reset**")
             st.caption("Destroys all data entirely.")
-            if st.button("☢️ FULL RESET", use_container_width=True, key="set_danger_factory"):
-                session.execute(text("TRUNCATE TABLE articles, extracted_iocs, feed_sources, keywords RESTART IDENTITY CASCADE;"))
+            if st.button("☢️ FULL RESET", width="stretch", key="set_danger_factory"):
+                session.execute(text("TRUNCATE TABLE articles, extracted_iocs, feed_sources, keywords, monitored_locations RESTART IDENTITY CASCADE;"))
                 session.commit(); safe_rerun()
 
 session.close()

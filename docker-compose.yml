@@ -11,7 +11,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d rss_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -33,6 +33,19 @@ services:
   worker:
     build: .
     command: python -u src/scheduler.py
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    volumes:
+      - ./src:/app/src
+
+  # The NEW Webhook Listener (FastAPI)
+  webhook:
+    build: .
+    command: python -u src/webhook_listener.py
+    ports:
+      - "8100:8100"
     depends_on:
       db:
         condition: service_healthy

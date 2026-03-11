@@ -1,5 +1,7 @@
 import os
 import bcrypt
+import time
+import random
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Float, Boolean, JSON, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
@@ -60,7 +62,7 @@ class Article(Base):
     published_date = Column(DateTime, default=datetime.utcnow, index=True)
     source = Column(String)
     score = Column(Float, default=0.0, index=True)
-    category = Column(String, default="General", index=True) # NEW CATEGORY FIELD
+    category = Column(String, default="General", index=True)
     keywords_found = Column(JSON)
     is_bubbled = Column(Boolean, default=False)
     story_group = Column(String, nullable=True) 
@@ -129,27 +131,99 @@ class DailyBriefing(Base):
     content = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class MonitoredLocation(Base):
+    __tablename__ = "monitored_locations"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)
+    lat = Column(Float)
+    lon = Column(Float)
+    loc_type = Column(String, default="General")
+    priority = Column(Integer, default=3)
+    current_spc_risk = Column(String, default="None")
+    last_updated = Column(DateTime, default=datetime.utcnow)
+
+# --- NEW: ML Alias Learner Table ---
+class NodeAlias(Base):
+    __tablename__ = "node_aliases"
+    id = Column(Integer, primary_key=True, index=True)
+    node_pattern = Column(String, unique=True, index=True) # E.g., "LR-CORE-RTR"
+    mapped_location_name = Column(String) # E.g., "Little Rock Branch"
+    confidence_score = Column(Float, default=0.0)
+    is_verified = Column(Boolean, default=False) # True if human approved
+
+class SolarWindsAlert(Base):
+    __tablename__ = "solarwinds_alerts"
+    id = Column(Integer, primary_key=True, index=True)
+    event_type = Column(String, index=True)
+    severity = Column(String)
+    node_name = Column(String, index=True)
+    ip_address = Column(String)
+    status = Column(String)
+    sw_timestamp = Column(String)
+    details = Column(Text)
+    node_link = Column(String)
+    raw_payload = Column(JSON, nullable=True) # Safely holds non-uniform webhook data
+    mapped_location = Column(String, nullable=True) # The final site name decided by the ML
+    received_at = Column(DateTime, default=datetime.utcnow, index=True)
+    is_correlated = Column(Boolean, default=False)
+    ai_root_cause = Column(Text, nullable=True)
+
+class RegionalOutage(Base):
+    __tablename__ = "regional_outages"
+    id = Column(Integer, primary_key=True, index=True)
+    outage_type = Column(String, index=True) # "Power", "ISP", "Cellular"
+    provider = Column(String) # e.g., "Entergy", "AT&T", "Comcast"
+    description = Column(Text)
+    affected_area = Column(String)
+    lat = Column(Float, nullable=True)
+    lon = Column(Float, nullable=True)
+    radius_km = Column(Float, default=10.0) # The estimated blast radius of the outage
+    detected_at = Column(DateTime, default=datetime.utcnow)
+    is_resolved = Column(Boolean, default=False)
+
+class TimelineEvent(Base):
+    __tablename__ = "timeline_events"
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    source = Column(String) # e.g., "SolarWinds Webhook", "System"
+    event_type = Column(String) # e.g., "Alert", "Resolution", "System"
+    message = Column(String)
+
 def init_db():
-    Base.metadata.create_all(bind=engine)
+    time.sleep(random.uniform(0.1, 2.0))
+    
+    try:
+        Base.metadata.create_all(bind=engine)
+    except Exception as e:
+        pass
     
     migrations = [
-        "ALTER TABLE articles ADD COLUMN story_group VARCHAR;",
-        "ALTER TABLE articles ADD COLUMN ai_bluf TEXT;",
-        "ALTER TABLE system_config ADD COLUMN tech_stack TEXT DEFAULT 'SolarWinds, Cisco SD-WAN, Microsoft Office, Verizon, Cisco';",
-        "ALTER TABLE articles ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE;",
-        "ALTER TABLE roles ADD COLUMN allowed_actions JSON DEFAULT '[]'::json;",
-        "ALTER TABLE users ADD COLUMN session_token VARCHAR;",
-        "ALTER TABLE system_config ADD COLUMN rolling_summary TEXT;",
-        "ALTER TABLE system_config ADD COLUMN rolling_summary_time TIMESTAMP;",
-        "ALTER TABLE users ADD COLUMN full_name VARCHAR;",
-        "ALTER TABLE users ADD COLUMN job_title VARCHAR;",
-        "ALTER TABLE users ADD COLUMN contact_info VARCHAR;",
-        "ALTER TABLE articles ADD COLUMN category VARCHAR DEFAULT 'General';",
+        "ALTER TABLE articles ADD COLUMN IF NOT EXISTS story_group VARCHAR;",
+        "ALTER TABLE articles ADD COLUMN IF NOT EXISTS ai_bluf TEXT;",
+        "ALTER TABLE system_config ADD COLUMN IF NOT EXISTS tech_stack TEXT DEFAULT 'SolarWinds, Cisco SD-WAN, Microsoft Office, Verizon, Cisco';",
+        "ALTER TABLE articles ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE;",
+        "ALTER TABLE roles ADD COLUMN IF NOT EXISTS allowed_actions JSON DEFAULT '[]'::json;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS session_token VARCHAR;",
+        "ALTER TABLE system_config ADD COLUMN IF NOT EXISTS rolling_summary TEXT;",
+        "ALTER TABLE system_config ADD COLUMN IF NOT EXISTS rolling_summary_time TIMESTAMP;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name VARCHAR;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS job_title VARCHAR;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS contact_info VARCHAR;",
+        "ALTER TABLE articles ADD COLUMN IF NOT EXISTS category VARCHAR DEFAULT 'General';",
+        "ALTER TABLE solarwinds_alerts ADD COLUMN IF NOT EXISTS raw_payload JSON;",
+        "ALTER TABLE solarwinds_alerts ADD COLUMN IF NOT EXISTS mapped_location VARCHAR;",
+        "ALTER TABLE solarwinds_alerts ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP;",
+        "CREATE TABLE IF NOT EXISTS timeline_events (id SERIAL PRIMARY KEY, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, source VARCHAR, event_type VARCHAR, message VARCHAR);",
+        "CREATE TABLE IF NOT EXISTS regional_outages (id SERIAL PRIMARY KEY, outage_type VARCHAR, provider VARCHAR, description TEXT, affected_area VARCHAR, lat FLOAT, lon FLOAT, radius_km FLOAT DEFAULT 10.0, detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_resolved BOOLEAN DEFAULT FALSE);",
+        "CREATE INDEX IF NOT EXISTS ix_regional_outages_type ON regional_outages (outage_type);",
         "CREATE INDEX IF NOT EXISTS ix_articles_published_date ON articles (published_date);",
         "CREATE INDEX IF NOT EXISTS ix_articles_score ON articles (score);",
         "CREATE INDEX IF NOT EXISTS ix_articles_category ON articles (category);",
         "CREATE TABLE IF NOT EXISTS extracted_iocs (id SERIAL PRIMARY KEY, article_id INTEGER, indicator_type VARCHAR, indicator_value VARCHAR, context TEXT, detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);",
-        "CREATE INDEX IF NOT EXISTS ix_extracted_iocs_article_id ON extracted_iocs (article_id);"
+        "CREATE INDEX IF NOT EXISTS ix_extracted_iocs_article_id ON extracted_iocs (article_id);",
+        "CREATE TABLE IF NOT EXISTS monitored_locations (id SERIAL PRIMARY KEY, name VARCHAR UNIQUE, lat FLOAT, lon FLOAT, loc_type VARCHAR DEFAULT 'General', priority INTEGER DEFAULT 3, current_spc_risk VARCHAR DEFAULT 'None', last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP);",
+        "CREATE TABLE IF NOT EXISTS solarwinds_alerts (id SERIAL PRIMARY KEY, event_type VARCHAR, severity VARCHAR, node_name VARCHAR, ip_address VARCHAR, status VARCHAR, sw_timestamp VARCHAR, details TEXT, node_link VARCHAR, raw_payload JSON, mapped_location VARCHAR, received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_correlated BOOLEAN DEFAULT FALSE, ai_root_cause TEXT);",
+        "CREATE TABLE IF NOT EXISTS node_aliases (id SERIAL PRIMARY KEY, node_pattern VARCHAR UNIQUE, mapped_location_name VARCHAR, confidence_score FLOAT DEFAULT 0.0, is_verified BOOLEAN DEFAULT FALSE);"
     ]
     
     for sql in migrations:
@@ -166,7 +240,8 @@ def init_db():
         "🌐 Operational Dashboard", 
         "📰 Daily Fusion Report",
         "📡 Threat Telemetry", 
-        "🎯 Threat Hunting & IOCs", # NEW PAGE
+        "🎯 Threat Hunting & IOCs",
+        "⚡ AIOps RCA", 
         "📑 Report Center", 
         "⚙️ Settings & Admin"
     ]
